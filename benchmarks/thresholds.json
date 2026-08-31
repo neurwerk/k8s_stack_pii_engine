@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "profile": "synthetic-no-models",
+  "iterations_per_size": 100,
+  "throughput_operations": 400,
+  "cold_start": {
+    "max_seconds": 5.0,
+    "max_peak_rss_mib": 512.0,
+    "max_steady_rss_mib": 384.0
+  },
+  "latency_ms": {
+    "128": {
+      "max_p95": 10.0,
+      "max_p99": 20.0
+    },
+    "8192": {
+      "max_p95": 50.0,
+      "max_p99": 100.0
+    },
+    "65536": {
+      "max_p95": 250.0,
+      "max_p99": 500.0
+    }
+  },
+  "throughput_min_rps": {
+    "1": 250.0,
+    "2": 250.0,
+    "4": 250.0
+  },
+  "max_queue_rejection_ms": 50.0
+}

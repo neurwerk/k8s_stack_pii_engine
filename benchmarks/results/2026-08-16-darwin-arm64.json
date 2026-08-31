@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "profile": "synthetic-no-models",
+  "generated_at": "2026-08-16T15:58:27.992831+00:00",
+  "system": "Darwin",
+  "machine": "arm64",
+  "logical_cpu_count": 11,
+  "python_version": "3.12.12",
+  "cold_start": {
+    "peak_rss_mib": 58.5625,
+    "steady_rss_mib": 58.5625,
+    "seconds": 0.3485095000069123
+  },
+  "latency_ms": {
+    "128": {
+      "p50": 0.18954099505208433,
+      "p95": 0.2207500219810754,
+      "p99": 0.24662501527927816
+    },
+    "8192": {
+      "p50": 3.505000000586733,
+      "p95": 3.6697500036098063,
+      "p99": 3.7102499918546528
+    },
+    "65536": {
+      "p50": 27.0584580139257,
+      "p95": 27.412916999310255,
+      "p99": 27.639666019240394
+    }
+  },
+  "throughput_rps": {
+    "1": 5281.1555183098735,
+    "2": 6067.8039488158665,
+    "4": 6949.285419748921
+  },
+  "queue_rejection_ms": 0.10479200864210725,
+  "failure_checks": {
+    "analysis_exception": true,
+    "missing_model_cache": true,
+    "unavailable_valkey": true
+  },
+  "thresholds": {
+    "schema_version": 1,
+    "profile": "synthetic-no-models",
+    "iterations_per_size": 100,
+    "throughput_operations": 400,
+    "cold_start": {
+      "max_seconds": 5.0,
+      "max_peak_rss_mib": 512.0,
+      "max_steady_rss_mib": 384.0
+    },
+    "latency_ms": {
+      "128": {
+        "max_p95": 10.0,
+        "max_p99": 20.0
+      },
+      "8192": {
+        "max_p95": 50.0,
+        "max_p99": 100.0
+      },
+      "65536": {
+        "max_p95": 250.0,
+        "max_p99": 500.0
+      }
+    },
+    "throughput_min_rps": {
+      "1": 250.0,
+      "2": 250.0,
+      "4": 250.0
+    },
+    "max_queue_rejection_ms": 50.0
+  },
+  "violations": [],
+  "passed": true
+}

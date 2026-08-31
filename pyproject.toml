@@ -1,0 +1,121 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "neurwerk-pii-engine"
+version = "0.7.2"
+description = "Bounded, deterministic PII and safety policy service for LLM requests"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "boto3>=1.35",
+    "de-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/de_core_news_sm-3.8.0/de_core_news_sm-3.8.0-py3-none-any.whl",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "nl-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/nl_core_news_sm-3.8.0/nl_core_news_sm-3.8.0-py3-none-any.whl",
+    "presidio-analyzer[transformers]==2.2.360",
+    "presidio-anonymizer==2.2.360",
+    "prometheus-client>=0.21",
+    "pydantic>=2.12",
+    "pydantic-settings>=2.6",
+    "pyyaml>=6.0",
+    "redis>=5,<7",
+    "transformers==4.57.3",
+    "uvicorn[standard]>=0.30",
+]
+
+[project.optional-dependencies]
+cpu = [
+    "torch==2.6.0",
+]
+cu124 = [
+    "cupy-cuda12x==13.6.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "torch==2.6.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6",
+    "ruff>=0.11",
+    "trustme>=1.2.1",
+    "ty>=0.0.66",
+]
+
+[project.scripts]
+pii-engine = "pii_engine.main:main"
+pii-engine-model-sync = "pii_engine.jobs.model_sync:main"
+
+[project.urls]
+Homepage = "https://github.com/neurwerk/k8s_stack_pii_engine"
+Repository = "https://github.com/neurwerk/k8s_stack_pii_engine"
+Issues = "https://github.com/neurwerk/k8s_stack_pii_engine/issues"
+Security = "https://github.com/neurwerk/k8s_stack_pii_engine/security/policy"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pii_engine"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "cu124" },
+    ],
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cu124", extra = "cu124", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C90", "BLE", "G", "S", "ANN", "D", "RUF", "FA", "SIM", "RET", "PTH", "C4", "TRY", "T20"]
+ignore = ["D203", "D212", "S104", "TRY003"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["D", "ANN", "S", "T20", "TRY003"]
+"src/pii_engine/jobs/*.py" = ["T20"]
+"src/pii_engine/controllers/api.py" = ["B008"]
+"**/__init__.py" = ["D104"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pii_engine"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*", "src/pii_engine/jobs/*"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true

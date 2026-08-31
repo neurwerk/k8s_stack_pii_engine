@@ -1,0 +1,49 @@
+/.git_backup*/
+
+# Environments and local configuration
+.venv/
+.direnv/
+.env
+.env.*
+!.env.example
+
+# Python and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ty/
+
+# Coverage and build output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local certificates and private keys
+/.certs/
+/certs/
+/*.crt
+/*.csr
+/*.key
+/*.p12
+/*.pem
+/*.pfx
+
+# Downloaded model bundles and caches
+/.cache/
+/.huggingface/
+/huggingface/
+/model-cache/
+/model_cache/
+/models/
+
+# Editor and OS files
+.DS_Store
+*.swp
+.idea/
+.vscode/
