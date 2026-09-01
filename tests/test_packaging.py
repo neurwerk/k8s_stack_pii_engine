@@ -98,3 +98,8 @@ def test_ci_uses_least_privilege_and_verifies_release_version() -> None:
     release = workflow["jobs"]["release"]
     assert release["needs"] == "build"
     assert release["permissions"] == {"contents": "write"}
+
+    required_ci = workflow["jobs"]["required_ci"]
+    assert required_ci["name"] == "Required CI"
+    assert required_ci["needs"] == ["quality", "build", "release"]
+    assert "always()" in required_ci["if"]
