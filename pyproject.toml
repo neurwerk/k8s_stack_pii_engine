@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "neurwerk-pii-engine"
-version = "0.7.2"
+version = "0.1.0"
 description = "Bounded, deterministic PII and safety policy service for LLM requests"
 readme = "README.md"
 license = "MIT"
