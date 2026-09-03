@@ -6,10 +6,10 @@ import asyncio
 import logging
 import ssl
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib.metadata import version as package_version
-from typing import Any
+from typing import Any, Literal
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -35,6 +35,13 @@ from pii_engine.runtime import EngineRuntime, get_runtime, initialize_runtime, s
 from pii_engine.services.errors import AnalysisRequestTooLargeError, InvalidAnalysisRequestError
 
 _VERSION = package_version("neurwerk-pii-engine")
+logger = logging.getLogger(__name__)
+type RequestFamily = Literal["chat", "responses", "mcp", "unknown"]
+type ValidationReason = Literal[
+    "extra_forbidden", "missing", "invalid_type", "invalid_value", "other"
+]
+type ValidationScope = Literal["top_level", "stream_options", "messages", "tools", "other"]
+_MAX_VALIDATION_ERRORS = 256
 
 
 class ClientCertificateH11Protocol(H11Protocol):
@@ -187,7 +194,17 @@ def _install_analysis_error_handlers(app: FastAPI) -> None:
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         code: AnalysisErrorCode = "invalid_request"
-        log_analysis_failure(_analysis_caller(request.url.path), code, exc, debug_details=False)
+        family, reason, scope, count = _validation_diagnostics(
+            request.url.path, exc.body, exc.errors()
+        )
+        logger.error(
+            "request validation failed family=%s reason=%s scope=%s count=%d caller=%s",
+            family,
+            reason,
+            scope,
+            count,
+            _analysis_caller(request.url.path),
+        )
         failure = analysis_api_error(code)
         return JSONResponse(
             status_code=failure.status_code,
@@ -203,6 +220,96 @@ def _install_analysis_error_handlers(app: FastAPI) -> None:
             status_code=failure.status_code,
             content=failure.response.model_dump(mode="json"),
         )
+
+
+def _validation_diagnostics(
+    path: str, body: object, errors: Sequence[Any]
+) -> tuple[RequestFamily, ValidationReason, ValidationScope, int]:
+    """Reduce validation failures to bounded labels without request-derived strings."""
+    family = _request_family(path, body)
+    bounded_errors = [error for error in errors[:_MAX_VALIDATION_ERRORS] if isinstance(error, dict)]
+    marker = {
+        "chat": "OpenAIChatRequest",
+        "responses": "OpenAIResponsesRequest",
+        "mcp": "McpRequest",
+    }.get(family)
+    selected = [error for error in bounded_errors if _validation_error_matches_model(error, marker)]
+    relevant_errors = selected or bounded_errors
+    reasons = {_validation_reason(error.get("type")) for error in relevant_errors}
+    scopes = {_validation_scope(family, error.get("loc")) for error in relevant_errors}
+    return (
+        family,
+        next(iter(reasons)) if len(reasons) == 1 else "other",
+        next(iter(scopes)) if len(scopes) == 1 else "other",
+        min(len(relevant_errors or errors), _MAX_VALIDATION_ERRORS),
+    )
+
+
+def _validation_error_matches_model(error: dict[Any, Any], marker: str | None) -> bool:
+    """Recognize a union branch, including Pydantic's model-validator wrapper."""
+    location = error.get("loc")
+    if marker is None or not isinstance(location, (list, tuple)) or not location:
+        return False
+    branch_index = 1 if location[0] == "body" and len(location) > 1 else 0
+    branch = location[branch_index]
+    return branch == marker or (
+        isinstance(branch, str)
+        and branch.startswith("function-after[")
+        and branch.endswith(f", {marker}]")
+    )
+
+
+def _request_family(path: str, body: object) -> RequestFamily:
+    """Classify only known request shapes without retaining or returning request values."""
+    candidate = body
+    if path.startswith("/v1/studio/") and isinstance(body, dict):
+        candidate = body.get("request")
+    if not isinstance(candidate, dict):
+        return "unknown"
+    if "messages" in candidate:
+        return "chat"
+    if "input" in candidate:
+        return "responses"
+    if any(key in candidate for key in ("jsonrpc", "method", "params")):
+        return "mcp"
+    return "unknown"
+
+
+def _validation_reason(error_type: object) -> ValidationReason:
+    """Map Pydantic's error taxonomy to a fixed operational taxonomy."""
+    if error_type == "extra_forbidden":
+        return "extra_forbidden"
+    if error_type == "missing":
+        return "missing"
+    if isinstance(error_type, str) and error_type.endswith("_type"):
+        return "invalid_type"
+    if error_type in {
+        "assertion_error",
+        "enum",
+        "finite_number",
+        "literal_error",
+        "value_error",
+    } or (
+        isinstance(error_type, str)
+        and error_type.startswith(("greater_than", "less_than", "string_"))
+    ):
+        return "invalid_value"
+    return "other"
+
+
+def _validation_scope(family: RequestFamily, location: object) -> ValidationScope:
+    """Map only known schema locations to fixed safe scope labels."""
+    if not isinstance(location, (list, tuple)):
+        return "other"
+    if "stream_options" in location:
+        return "stream_options"
+    if "messages" in location:
+        return "messages"
+    if "tools" in location:
+        return "tools"
+    if family != "unknown":
+        return "top_level"
+    return "other"
 
 
 def _analysis_caller(path: str) -> str:

@@ -136,6 +136,41 @@ async def test_info_logging_excludes_raw_exception_and_traceback(
     assert "Traceback" not in caplog.text
 
 
+async def test_validation_logging_contains_only_bounded_safe_diagnostics(
+    client: httpx.AsyncClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    unknown_name = "synthetic_unknown_request_key"
+    rejected_value = "synthetic_rejected_request_value"
+    caplog.set_level(logging.ERROR, logger="pii_engine.main")
+
+    cases = [
+        ({**_request(), unknown_name: rejected_value}, "top_level"),
+        (
+            {
+                **_request(),
+                "stream_options": {
+                    "include_usage": True,
+                    unknown_name: rejected_value,
+                },
+            },
+            "stream_options",
+        ),
+    ]
+    for payload, scope in cases:
+        caplog.clear()
+        response = await client.post("/v1/adapter/analyze-request", json=payload)
+
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "invalid_request"
+        assert (
+            "request validation failed family=chat reason=extra_forbidden "
+            f"scope={scope} count=1" in caplog.text
+        )
+        assert unknown_name not in caplog.text
+        assert rejected_value not in caplog.text
+
+
 async def test_debug_logging_includes_exception_and_traceback(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

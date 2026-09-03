@@ -148,6 +148,12 @@ class ChatMessage(StrictModel):
         return self
 
 
+class ChatStreamOptions(StrictModel):
+    """Control metadata included in a streamed Chat Completions response."""
+
+    include_usage: Annotated[bool, Field(strict=True)]
+
+
 class OpenAIChatRequest(StrictModel):
     """Bound an OpenAI Chat Completions request."""
 
@@ -157,12 +163,20 @@ class OpenAIChatRequest(StrictModel):
     top_p: float | None = Field(default=None, ge=0, le=1)
     max_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
     stream: bool = False
+    stream_options: ChatStreamOptions | None = None
     n: int | None = Field(default=None, ge=1, le=16)
     stop: str | list[str] | None = None
     tools: list[ToolDefinition] = Field(default_factory=list, max_length=128)
     tool_choice: Literal["none", "auto", "required"] | dict[str, JsonValue] | None = None
     response_format: dict[str, JsonValue] | None = None
     user: str | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_stream_options(self) -> OpenAIChatRequest:
+        """Allow stream options only for streamed Chat Completions requests."""
+        if self.stream_options is not None and not self.stream:
+            raise ValueError("stream_options require stream to be enabled")
+        return self
 
 
 class ResponseTextPart(StrictModel):
