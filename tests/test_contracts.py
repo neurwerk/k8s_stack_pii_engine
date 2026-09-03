@@ -97,10 +97,37 @@ async def test_chat_stream_usage_control_survives_analysis(
 def test_chat_stream_usage_contract_rejects_invalid_controls(
     updates: dict[str, object],
 ) -> None:
-    payload = {**_request(), **updates}
+    stream = {"stream": True} if "stream_options" in updates else {}
+    payload = {**_request(), **stream, **updates}
 
     with pytest.raises(ValidationError):
         OpenAIChatRequest.model_validate(payload)
+
+
+@pytest.mark.parametrize("stream", [None, False], ids=["omitted", "disabled"])
+async def test_chat_stream_usage_contract_requires_streaming(
+    client: httpx.AsyncClient, stream: bool | None
+) -> None:
+    payload = {**_request(), "stream_options": {"include_usage": True}}
+    if stream is not None:
+        payload["stream"] = stream
+
+    response = await client.post("/v1/adapter/analyze-request", json=payload)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize("stream", [None, False], ids=["omitted", "disabled"])
+def test_chat_nonstream_contract_remains_valid_without_stream_options(stream: bool | None) -> None:
+    payload = _request()
+    if stream is not None:
+        payload["stream"] = stream
+
+    request = OpenAIChatRequest.model_validate(payload)
+
+    assert request.stream is False
+    assert request.stream_options is None
 
 
 async def test_clean_adapter_analysis_has_an_empty_current_report(

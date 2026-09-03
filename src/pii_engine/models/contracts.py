@@ -171,6 +171,13 @@ class OpenAIChatRequest(StrictModel):
     response_format: dict[str, JsonValue] | None = None
     user: str | None = Field(default=None, max_length=256)
 
+    @model_validator(mode="after")
+    def validate_stream_options(self) -> OpenAIChatRequest:
+        """Allow stream options only for streamed Chat Completions requests."""
+        if self.stream_options is not None and not self.stream:
+            raise ValueError("stream_options require stream to be enabled")
+        return self
+
 
 class ResponseTextPart(StrictModel):
     """Represent text accepted by the OpenAI Responses API."""

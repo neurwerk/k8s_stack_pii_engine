@@ -233,7 +233,7 @@ def _validation_diagnostics(
         "responses": "OpenAIResponsesRequest",
         "mcp": "McpRequest",
     }.get(family)
-    selected = [error for error in bounded_errors if marker in error.get("loc", ())]
+    selected = [error for error in bounded_errors if _validation_error_matches_model(error, marker)]
     relevant_errors = selected or bounded_errors
     reasons = {_validation_reason(error.get("type")) for error in relevant_errors}
     scopes = {_validation_scope(family, error.get("loc")) for error in relevant_errors}
@@ -242,6 +242,20 @@ def _validation_diagnostics(
         next(iter(reasons)) if len(reasons) == 1 else "other",
         next(iter(scopes)) if len(scopes) == 1 else "other",
         min(len(relevant_errors or errors), _MAX_VALIDATION_ERRORS),
+    )
+
+
+def _validation_error_matches_model(error: dict[Any, Any], marker: str | None) -> bool:
+    """Recognize a union branch, including Pydantic's model-validator wrapper."""
+    location = error.get("loc")
+    if marker is None or not isinstance(location, (list, tuple)) or not location:
+        return False
+    branch_index = 1 if location[0] == "body" and len(location) > 1 else 0
+    branch = location[branch_index]
+    return branch == marker or (
+        isinstance(branch, str)
+        and branch.startswith("function-after[")
+        and branch.endswith(f", {marker}]")
     )
 
 
