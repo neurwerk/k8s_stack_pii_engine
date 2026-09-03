@@ -14,6 +14,7 @@ from pii_engine.models.contracts import (
     AnalysisErrorResponse,
     AnalysisMetadata,
     McpRequest,
+    OpenAIChatRequest,
     PIIReport,
     PIIReportRow,
 )
@@ -65,6 +66,41 @@ async def test_adapter_returns_sanitized_request(client: httpx.AsyncClient) -> N
         "response": ["Sensitive data was anonymized."],
     }
     assert "a@example.com" not in json.dumps(body["report"])
+
+
+@pytest.mark.parametrize("include_usage", [True, False])
+async def test_chat_stream_usage_control_survives_analysis(
+    client: httpx.AsyncClient, include_usage: bool
+) -> None:
+    payload = {
+        **_request(),
+        "stream": True,
+        "stream_options": {"include_usage": include_usage},
+    }
+
+    response = await client.post("/v1/adapter/analyze-request", json=payload)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["request"]["stream_options"] == {"include_usage": include_usage}
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"stream_options": {}},
+        {"stream_options": {"include_usage": True, "unknown": "rejected"}},
+        {"unknown": "rejected"},
+        {"stream_options": {"include_usage": "true"}},
+        {"stream_options": {"include_usage": 1}},
+    ],
+)
+def test_chat_stream_usage_contract_rejects_invalid_controls(
+    updates: dict[str, object],
+) -> None:
+    payload = {**_request(), **updates}
+
+    with pytest.raises(ValidationError):
+        OpenAIChatRequest.model_validate(payload)
 
 
 async def test_clean_adapter_analysis_has_an_empty_current_report(
