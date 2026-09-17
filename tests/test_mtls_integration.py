@@ -77,8 +77,11 @@ async def _running_server(settings: Settings, runtime: EngineRuntime) -> AsyncIt
         listener.close()
 
 
+@pytest.mark.parametrize(
+    "path", ["/v1/adapter/analyze-request", "/v1/adapter/analyze-document-request"]
+)
 async def test_real_mtls_separates_adapter_and_studio_identities(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str
 ) -> None:
     """TLS and route authorization keep reversal material adapter-only."""
     ca = trustme.CA()
@@ -136,7 +139,7 @@ async def test_real_mtls_separates_adapter_and_studio_identities(
             trust_env=False,
         ) as adapter_client:
             adapter_ready = await adapter_client.get("/v1/adapter/ready")
-            adapter_result = await adapter_client.post("/v1/adapter/analyze-request", json=request)
+            adapter_result = await adapter_client.post(path, json=request)
             adapter_cross = await adapter_client.post(
                 "/v1/studio/analyze-request", json={"request": request}
             )
@@ -156,7 +159,7 @@ async def test_real_mtls_separates_adapter_and_studio_identities(
             studio_evaluation = await studio_client.post(
                 "/v1/studio/evaluate-policy", json={"request": request}
             )
-            studio_cross = await studio_client.post("/v1/adapter/analyze-request", json=request)
+            studio_cross = await studio_client.post(path, json=request)
             studio_admin = await studio_client.get("/v1/actions")
         async with httpx.AsyncClient(
             base_url=base_url,
@@ -164,9 +167,7 @@ async def test_real_mtls_separates_adapter_and_studio_identities(
             trust_env=False,
         ) as unauthorized_client:
             unauthorized_ready = await unauthorized_client.get("/v1/adapter/ready")
-            unauthorized_result = await unauthorized_client.post(
-                "/v1/adapter/analyze-request", json=request
-            )
+            unauthorized_result = await unauthorized_client.post(path, json=request)
         async with httpx.AsyncClient(
             base_url=base_url,
             verify=_client_context(ca_path, None),

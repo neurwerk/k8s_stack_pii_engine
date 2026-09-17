@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
 from pii_engine.config.policy import PolicySettings
 from pii_engine.config.settings import Settings
 from pii_engine.models.contracts import McpRequest, OpenAIChatRequest
-from pii_engine.runtime import EngineRuntime
+from pii_engine.runtime import EngineRuntime, set_runtime
 from pii_engine.services.session import SessionDecision, SessionStore
 
 
@@ -281,9 +283,11 @@ async def test_non_tainting_actions_never_create_session_state() -> None:
     assert redis.values == {}
 
 
-async def test_reversible_placeholders_are_stable_only_within_one_adapter_session() -> None:
+async def test_reversible_placeholders_are_stable_only_within_one_adapter_session(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Tool continuations retain aliases without making conversations linkable."""
-    runtime, _redis = _runtime()
+    runtime, redis = _runtime()
     _set_reversible_policy(runtime)
     other_policy = EngineRuntime(Settings(allow_test_analyzer=True, policy_version="v2"))
     other_hash_key = EngineRuntime(Settings(allow_test_analyzer=True, hash_key="h" * 32))
@@ -312,6 +316,58 @@ async def test_reversible_placeholders_are_stable_only_within_one_adapter_sessio
     assert next(iter(hash_key_changed.reversal)) != first_placeholder
     assert first.reversal == {first_placeholder: "a@example.com"}
     assert "1" * 64 not in first_placeholder
+
+    blocked = OpenAIChatRequest(
+        model="test", messages=[{"role": "user", "content": "password: hunter2"}]
+    )
+    await runtime.analyze("adapter", blocked, "1" * 64)
+    monkeypatch.setattr(redis, "getex", AsyncMock(side_effect=AssertionError("session read")))
+    monkeypatch.setattr(redis, "set", AsyncMock(side_effect=AssertionError("session write")))
+    scoped = await runtime.analyze("adapter", request, "1" * 64, request_scoped=True)
+    assert scoped.reversal != first.reversal
+    assert scoped.cached_decision_applied is False
+    assert (await runtime.analyze("adapter", blocked, request_scoped=True)).decision == "block"
+
+    set_runtime(runtime)
+    analyze = Mock(wraps=runtime.policy.analyze)
+    monkeypatch.setattr(runtime.policy, "analyze", analyze)
+    path = "/v1/adapter/analyze-document-request"
+    for field, part_type in (("messages", "text"), ("input", "input_text")):
+        payload = {
+            "model": "test",
+            field: [
+                {"role": "user", "content": [{"type": part_type, "text": "a@example.com"}]},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": part_type, "text": "Author: a@example.com\nPage: 1"},
+                        {"type": part_type, "text": "Document text: a@example.com"},
+                    ],
+                },
+            ],
+        }
+        previous_reversal = scoped.reversal
+        for headers in ({"x-pii-session-key": "1" * 64}, {}):
+            analyze.reset_mock()
+            response = await client.post(path, json=payload, headers=headers)
+            assert response.status_code == 200
+            body = response.json()
+            assert body["decision"] == "apply_actions"
+            assert body["analysis"]["source"] == "current_request"
+            assert body["analysis"]["scan_performed"] is True
+            assert body["analysis"]["cached_decision_applied"] is False
+            assert body["analysis"]["text_leaf_count"] == 3
+            assert body["entity_counts"] == {"EMAIL_ADDRESS": 3}
+            placeholder = next(iter(body["reversal"]))
+            assert body["reversal"] == {placeholder: "a@example.com"}
+            assert body["reversal"] != previous_reversal
+            transformed = json.dumps(body["request"])
+            assert "a@example.com" not in transformed
+            assert transformed.count(placeholder) == 3
+            assert "Author:" in transformed and "Page: 1" in transformed
+            assert body["report"]["rows"][0]["unique_transformed_count"] == 1
+            analyze.assert_called_once()
+            previous_reversal = body["reversal"]
 
 
 async def test_session_payload_contains_no_request_or_reversal_material() -> None:

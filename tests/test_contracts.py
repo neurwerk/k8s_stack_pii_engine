@@ -819,7 +819,19 @@ async def test_safety_rule_blocks_before_request_is_returned(client: httpx.Async
     assert response.json()["analysis"]["duration_ms"] is None
 
 
-async def test_attachment_policy_blocks_known_content_parts(client: httpx.AsyncClient) -> None:
+@pytest.mark.parametrize(
+    "path", ["/v1/adapter/analyze-request", "/v1/adapter/analyze-document-request"]
+)
+@pytest.mark.parametrize(
+    "attachment",
+    [
+        {"type": "image_url", "image_url": {"url": "https://example.test/a.png"}},
+        {"type": "file", "file": {"filename": "sample.txt", "file_data": "c2FtcGxl"}},
+    ],
+)
+async def test_attachment_policy_blocks_known_content_parts(
+    client: httpx.AsyncClient, path: str, attachment: dict[str, object]
+) -> None:
     """Attachment payloads are accepted only to produce a taintable policy block."""
     payload = {
         "model": "test",
@@ -828,16 +840,28 @@ async def test_attachment_policy_blocks_known_content_parts(client: httpx.AsyncC
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "describe this"},
-                    {"type": "image_url", "image_url": {"url": "https://example.test/a.png"}},
+                    attachment,
                 ],
-            }
+            },
+            {"role": "user", "content": "Summarize the earlier attachment."},
         ],
     }
-    response = await client.post("/v1/adapter/analyze-request", json=payload)
+    response = await client.post(path, json=payload)
     assert response.status_code == 200
     assert response.json()["decision"] == "block"
     assert response.json()["applied_actions"] == ["block"]
     assert response.json()["request"] is None
+    assert response.json()["reversal"] == {}
+    assert response.json()["analysis"]["scan_performed"] is False
+
+    for invalid in (
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "lookup"}},
+        {"schema_name": "DoclingDocument", "texts": [{"text": "document content"}]},
+    ):
+        response = await client.post("/v1/adapter/analyze-document-request", json=invalid)
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "invalid_request"
+        assert "request" not in response.json() and "reversal" not in response.json()
 
 
 async def test_pass_action_reports_detected_entities_without_claiming_masking(

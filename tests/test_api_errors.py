@@ -28,6 +28,9 @@ def _error(code: str, message: str, retryable: bool) -> dict[str, object]:
 
 
 @pytest.mark.parametrize(
+    "path", ["/v1/adapter/analyze-request", "/v1/adapter/analyze-document-request"]
+)
+@pytest.mark.parametrize(
     ("exception", "status", "code", "message", "retryable"),
     [
         (
@@ -84,6 +87,8 @@ def _error(code: str, message: str, retryable: bool) -> dict[str, object]:
 async def test_analysis_failures_use_stable_typed_responses(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    path: str,
     exception: Exception,
     status: int,
     code: str,
@@ -94,10 +99,14 @@ async def test_analysis_failures_use_stable_typed_responses(
         raise exception
 
     monkeypatch.setattr(get_runtime(), "analyze", fail)
-    response = await client.post("/v1/adapter/analyze-request", json=_request())
+    caplog.set_level(logging.DEBUG, logger="pii_engine.controllers.api")
+    response = await client.post(path, json=_request())
     assert response.status_code == status
     assert response.json() == _error(code, message, retryable)
     assert "diagnostic marker" not in response.text
+    if path.endswith("analyze-document-request"):
+        assert "diagnostic marker" not in caplog.text
+        assert "Traceback" not in caplog.text
 
 
 async def test_planner_overlap_resolves_without_an_analysis_error(

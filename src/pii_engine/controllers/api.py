@@ -25,6 +25,8 @@ from pii_engine.models.contracts import (
     AnalysisErrorResponse,
     AnalysisMetadata,
     Notices,
+    OpenAIChatRequest,
+    OpenAIResponsesRequest,
     PIIReport,
     PolicyResponse,
     StudioAnalyzeResponse,
@@ -189,6 +191,35 @@ async def analyze_adapter(
 ) -> Response:
     """Analyze for extproc and return request-scoped reversal material."""
     result = await _analyze(request, caller, session_key)
+    return _adapter_response(result, caller)
+
+
+@router.post(
+    "/adapter/analyze-document-request",
+    response_model=AdapterAnalyzeResponse,
+    responses=_ANALYSIS_ERROR_RESPONSES,
+)
+async def analyze_document_adapter(
+    request: OpenAIChatRequest | OpenAIResponsesRequest,
+    caller: Caller = Depends(adapter_identity),
+) -> Response:
+    """Analyze the whole extracted-text request once, without session reuse or persistence."""
+    # PII split across separate lines or table cells may be missed; improve this later.
+    try:
+        result = await get_runtime().analyze(caller, request, request_scoped=True)
+        return _adapter_response(result, caller, debug_details=False)
+    except AnalysisAPIError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - document failures must never log content.
+        code = _failure_code(exc)
+        log_analysis_failure(caller, code, exc, debug_details=False)
+        raise analysis_api_error(code) from None
+
+
+def _adapter_response(
+    result: PolicyResult, caller: Caller, *, debug_details: bool = True
+) -> Response:
+    """Validate and bound the complete adapter response before returning any content."""
     settings = get_runtime().settings
     try:
         response = AdapterAnalyzeResponse(
@@ -209,7 +240,7 @@ async def analyze_adapter(
         content = response.model_dump_json(by_alias=True).encode("utf-8")
     except (ValidationError, PydanticSerializationError) as exc:
         code: AnalysisErrorCode = "internal_error"
-        log_analysis_failure(caller, code, exc)
+        log_analysis_failure(caller, code, exc, debug_details=debug_details)
         raise analysis_api_error(code) from None
     if len(content) > settings.max_adapter_response_bytes:
         exc = AnalysisRequestTooLargeError("adapter response body too large")
