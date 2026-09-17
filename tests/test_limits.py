@@ -451,10 +451,14 @@ def _response_result(plaintext: str) -> PolicyResult:
     )
 
 
+@pytest.mark.parametrize(
+    "path", ["/v1/adapter/analyze-request", "/v1/adapter/analyze-document-request"]
+)
 async def test_adapter_response_budget_accepts_exact_bytes_and_returns_typed_413_over(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    path: str,
 ) -> None:
     marker = "response-budget-private-marker"
     result = _response_result(marker * 100)
@@ -465,7 +469,7 @@ async def test_adapter_response_budget_accepts_exact_bytes_and_returns_typed_413
     runtime = get_runtime()
     monkeypatch.setattr(runtime, "analyze", analyze)
     first = await client.post(
-        "/v1/adapter/analyze-request",
+        path,
         json={"model": "test", "messages": [{"role": "user", "content": "x"}]},
     )
     assert first.status_code == 200
@@ -473,23 +477,33 @@ async def test_adapter_response_budget_accepts_exact_bytes_and_returns_typed_413
 
     runtime.settings.max_adapter_response_bytes = exact_size
     exact = await client.post(
-        "/v1/adapter/analyze-request",
+        path,
         json={"model": "test", "messages": [{"role": "user", "content": "x"}]},
     )
     assert exact.status_code == 200
     assert len(exact.content) == exact_size
 
     caplog.clear()
-    caplog.set_level(logging.INFO, logger="pii_engine.controllers.api")
+    caplog.set_level(logging.DEBUG, logger="pii_engine.controllers.api")
     runtime.settings.max_adapter_response_bytes = exact_size - 1
     over = await client.post(
-        "/v1/adapter/analyze-request",
+        path,
         json={"model": "test", "messages": [{"role": "user", "content": "x"}]},
     )
     assert over.status_code == 413
     assert over.json()["error"]["code"] == "request_too_large"
     assert marker not in caplog.text
     assert "Traceback" not in caplog.text
+
+    if path.endswith("analyze-document-request"):
+        result.reversal = {"invalid-key": marker}
+        invalid = await client.post(
+            path, json={"model": "test", "messages": [{"role": "user", "content": "x"}]}
+        )
+        assert invalid.status_code == 500
+        assert invalid.json()["error"]["code"] == "internal_error"
+        assert marker not in caplog.text
+        assert "Traceback" not in caplog.text
 
 
 async def test_invalid_adapter_response_is_contained_without_payload_logging(

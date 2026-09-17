@@ -196,8 +196,10 @@ class EngineRuntime:
         request: SupportedRequest,
         session_key: str | None = None,
         policy_override: PolicyOverride | None = None,
+        *,
+        request_scoped: bool = False,
     ) -> PolicyResult:
-        """Apply session state and one shared bounded CPU analysis queue."""
+        """Use the shared bounded queue, optionally without session state or stable aliases."""
         validate_request_structure(request, self.settings.max_nesting_depth)
         if not await self.ready():
             raise RuntimeNotReadyError("policy runtime is not ready")
@@ -210,7 +212,7 @@ class EngineRuntime:
         )
         policy = self._policy_service(active_policy) if policy_override is not None else self.policy
         request_kind = _request_kind(request)
-        validated_session_key = _validated_session_key(session_key)
+        validated_session_key = None if request_scoped else _validated_session_key(session_key)
         placeholder_namespace = (
             _conversation_placeholder_namespace(
                 validated_session_key,
@@ -222,7 +224,11 @@ class EngineRuntime:
             and validated_session_key is not None
             else None
         )
-        cached = await self._cached_decision(caller, session_key, request_kind)
+        cached = (
+            None
+            if request_scoped
+            else await self._cached_decision(caller, session_key, request_kind)
+        )
         cached_result = self._final_cached_result(request, cached, active_policy)
         if cached_result is not None:
             self._validate_result_kind(cached_result, request_kind)
@@ -273,7 +279,9 @@ class EngineRuntime:
             started_waiter.cancel()
         self._apply_cached_decision(result, cached)
         self._validate_result_kind(result, request_kind)
-        await self._taint_session(caller, session_key, result, cached, request_kind)
+        await self._taint_session(
+            caller, session_key, result, cached, request_kind, request_scoped=request_scoped
+        )
         self._record_result(caller, result)
         return result
 
@@ -565,9 +573,12 @@ class EngineRuntime:
         result: PolicyResult,
         cached: SessionDecision | None,
         request_kind: RequestKind,
+        *,
+        request_scoped: bool = False,
     ) -> None:
         if (
-            caller != "adapter"
+            request_scoped
+            or caller != "adapter"
             or self.session is None
             or result.decision not in {"block", "reroute"}
         ):

@@ -24,6 +24,23 @@ This repository owns the engine service and model-sync CLI. Gateway adaptation,
 human authorization, Kubernetes charts, and deployment values are separate
 components.
 
+## Document Request API
+
+`POST /v1/adapter/analyze-document-request` requires the adapter mTLS identity.
+Its body is an existing `OpenAIChatRequest` or `OpenAIResponsesRequest`: the whole
+conversation with extracted document text and any retained metadata already in
+model-visible text parts, not raw Docling JSON. Typed attachments produce the
+existing policy `block` with no request content or reversal; MCP is invalid here.
+
+The endpoint uses the same policy, planner, `AdapterAnalyzeResponse`, and typed
+errors as `/v1/adapter/analyze-request`. It analyzes the complete request once,
+uses fresh request-local aliases, and never reads or writes session decisions;
+`x-pii-session-key` is ignored. Readiness, queue, timeouts, body/text limits, and
+the adapter response byte limit remain shared. Failures return no partial result,
+and exception details are suppressed even at `DEBUG`. No cross-line or table-cell
+reconstruction is performed, so split PII may be missed. Existing adapter, MCP,
+and Studio routes are unchanged.
+
 ## Configuration
 
 Runtime environment variables use the `PII_ENGINE_` prefix. Supported setting
