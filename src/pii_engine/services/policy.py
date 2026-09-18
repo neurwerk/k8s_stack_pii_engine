@@ -9,16 +9,14 @@ from typing import Literal, cast
 from pii_engine.config.policy import PolicySettings
 from pii_engine.config.settings import Settings
 from pii_engine.lib.safety import SAFETY_BY_NAME, SafetyRule
-from pii_engine.metrics import actions_total
+from pii_engine.metrics import actions_total, entities_total
 from pii_engine.models.contracts import (
-    AttachmentPart,
+    DocumentAnalyzeRequest,
     McpRequest,
-    OpenAIChatRequest,
-    OpenAIResponsesRequest,
     PIIAction,
     PIIReportRow,
-    ResponseMessage,
     SupportedRequest,
+    has_attachments,
 )
 from pii_engine.services.analyzer import Analyzer, EntityMatch
 from pii_engine.services.errors import AnalysisRequestTooLargeError, InvalidAnalysisRequestError
@@ -104,16 +102,62 @@ class PolicyService:
 
     def analyze(
         self,
-        request: SupportedRequest,
+        request: SupportedRequest | DocumentAnalyzeRequest,
         *,
         include_diagnostics: bool = False,
         placeholder_namespace: str | None = None,
     ) -> PolicyResult:
         """Run bounds, traversal, safety, PII, actions, and classification in order."""
+        document = request if isinstance(request, DocumentAnalyzeRequest) else None
+        request = request.request if isinstance(request, DocumentAnalyzeRequest) else request
         leaves = iter_text_leaves(request, self.settings.max_nesting_depth)
-        if preflight := self._preflight(request, leaves):
-            return preflight
+        result = self._preflight(request, leaves)
+        face_route = None
+        if document is not None:
+            faces = document.visual_findings.faces
+            face_policy = self.policy.attachments.faces
+            if faces.count and face_policy.action == "reroute":
+                face_route = face_policy.route_class or self.policy.routing.default_target
+            if result is None and (
+                faces.scan_status == "failed" or (faces.count and face_policy.action == "block")
+            ):
+                actions_total.labels(action="block").inc()
+                result = PolicyResult(
+                    request=None,
+                    decision="block",
+                    remote_allowed=False,
+                    applied_actions=["block"],
+                    text_leaf_count=len(leaves),
+                )
+            if result is None and not document.text_pii_enabled:
+                result = PolicyResult(
+                    request=request,
+                    decision="pass",
+                    remote_allowed=True,
+                    text_leaf_count=len(leaves),
+                )
+        if result is None:
+            result = self._analyze_text(
+                request,
+                leaves,
+                include_diagnostics=include_diagnostics,
+                placeholder_namespace=placeholder_namespace,
+                face_route=face_route,
+            )
+        if document is not None:
+            self._apply_visual_result(result, document, face_route)
+        return result
 
+    def _analyze_text(
+        self,
+        request: SupportedRequest,
+        leaves: list[TextLeaf],
+        *,
+        include_diagnostics: bool,
+        placeholder_namespace: str | None,
+        face_route: str | None,
+    ) -> PolicyResult:
+        """Resolve text and face routing conflicts before transforming any text."""
         nonce = placeholder_namespace or request_nonce()
         prepared, entities, counts, route_classes, reroute_entities, overlap_count = (
             self._prepare_plans(leaves, reroute_as_block=isinstance(request, McpRequest))
@@ -122,7 +166,9 @@ class PolicyService:
             self._diagnostics(prepared) if include_diagnostics else ([], [], False)
         )
         original_text = "\n".join(leaf.text for leaf in leaves)
-        if any(plan.blocked for _leaf, plan in prepared):
+        if any(plan.blocked for _leaf, plan in prepared) or self._face_route_conflicts(
+            face_route, reroute_entities
+        ):
             return PolicyResult(
                 request=None,
                 decision="block",
@@ -139,7 +185,7 @@ class PolicyService:
                 diagnostics_truncated=diagnostics_truncated,
             )
 
-        route_class = self._resolve_route_class(reroute_entities, route_classes)
+        route_class = face_route or self._resolve_route_class(reroute_entities, route_classes)
         transformed, actions, reversal = self._transform_plans(request, prepared, nonce)
         if any(placeholder in original_text for placeholder in reversal):
             raise ValueError("generated reversal placeholder already existed in request")
@@ -175,6 +221,49 @@ class PolicyService:
             effective_regions=effective_regions,
             diagnostics_truncated=diagnostics_truncated,
         )
+
+    def _face_route_conflicts(self, face_route: str | None, reroute_entities: set[str]) -> bool:
+        """Require every effective text reroute to agree with the face route."""
+        return face_route is not None and any(
+            self._resolve_route_class({entity}, [self.policy.routing.default_target]) != face_route
+            for entity in reroute_entities
+        )
+
+    def _apply_visual_result(
+        self, result: PolicyResult, document: DocumentAnalyzeRequest, face_route: str | None
+    ) -> None:
+        """Add aggregate face evidence without inventing text spans or transformations."""
+        count = document.visual_findings.faces.count
+        if not count:
+            return
+        action = "block" if result.decision == "block" else self.policy.attachments.faces.action
+        if result.decision == "pass" and not result.entities:
+            result.response_notices = []
+        result.entity_counts["FACE"] = count
+        result.entities = sorted(result.entity_counts)
+        result.report_rows.append(
+            PIIReportRow(
+                entity_type="FACE",
+                action=action,
+                detected_count=count,
+                transformed_count=0,
+                unique_transformed_count=0,
+            )
+        )
+        result.report_rows.sort(key=lambda row: row.entity_type)
+        result.applied_actions = sorted(set(result.applied_actions) | {action})
+        entities_total.labels(entity_type="FACE").inc(count)
+        if action == "reroute":
+            result.decision = "reroute"
+            result.remote_allowed = False
+            result.route_class = face_route
+            result.response_notices = [self.policy.notice.rerouted]
+        elif action == "text-only":
+            if result.decision == "pass":
+                result.decision = "apply_actions"
+            result.response_notices.append("Faces were detected; images must be withheld.")
+        if action != "block":
+            actions_total.labels(action=action).inc()
 
     def _diagnostics(
         self, prepared: list[tuple[TextLeaf, LeafPlan]]
@@ -298,10 +387,10 @@ class PolicyService:
         """Apply bounds, attachment policy, and original-text safety before PII work."""
         if isinstance(request, McpRequest) and not leaves:
             return PolicyResult(request=request, decision="pass", remote_allowed=True)
-        has_attachments = _has_attachments(request)
-        if leaves or not has_attachments:
+        attachments = has_attachments(request)
+        if leaves or not attachments:
             self._validate_bounds(leaves)
-        if has_attachments:
+        if attachments:
             actions_total.labels(action="block").inc()
             return PolicyResult(
                 request=None,
@@ -439,25 +528,6 @@ def _report_rows(prepared: list[tuple[TextLeaf, LeafPlan]]) -> list[PIIReportRow
         )
         for entity_type in sorted(detected)
     ]
-
-
-def _has_attachments(request: SupportedRequest) -> bool:
-    """Inspect only schema-designated content blocks for blocked attachments."""
-    if isinstance(request, OpenAIChatRequest):
-        return any(
-            isinstance(part, AttachmentPart)
-            for message in request.messages
-            if isinstance(message.content, list)
-            for part in message.content
-        )
-    if isinstance(request, OpenAIResponsesRequest) and isinstance(request.input, list):
-        return any(
-            isinstance(part, AttachmentPart)
-            for item in request.input
-            if isinstance(item, ResponseMessage)
-            for part in item.content
-        )
-    return False
 
 
 def _normalized_source(

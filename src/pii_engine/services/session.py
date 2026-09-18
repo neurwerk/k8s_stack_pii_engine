@@ -59,6 +59,8 @@ class SessionDecision(BaseModel):
 
     def _validate_report_counts(self) -> None:
         """Require bounded cached aggregates to remain internally consistent."""
+        if "FACE" in self.entity_counts:
+            raise ValueError("visual findings cannot enter session state")
         if len(self.entities) != len(set(self.entities)) or set(self.entity_counts) != set(
             self.entities
         ):

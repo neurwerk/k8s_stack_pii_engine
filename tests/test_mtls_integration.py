@@ -78,10 +78,15 @@ async def _running_server(settings: Settings, runtime: EngineRuntime) -> AsyncIt
 
 
 @pytest.mark.parametrize(
-    "path", ["/v1/adapter/analyze-request", "/v1/adapter/analyze-document-request"]
+    "path,visual_envelope",
+    [
+        ("/v1/adapter/analyze-request", False),
+        ("/v1/adapter/analyze-document-request", False),
+        ("/v1/adapter/analyze-document-request", True),
+    ],
 )
 async def test_real_mtls_separates_adapter_and_studio_identities(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str, visual_envelope: bool
 ) -> None:
     """TLS and route authorization keep reversal material adapter-only."""
     ca = trustme.CA()
@@ -132,6 +137,16 @@ async def test_real_mtls_separates_adapter_and_studio_identities(
         "model": "test",
         "messages": [{"role": "user", "content": "email a@example.com"}],
     }
+    adapter_request = (
+        {
+            "api_version": "v1",
+            "request": request,
+            "text_pii_enabled": True,
+            "visual_findings": {"faces": {"scan_status": "complete", "count": 0}},
+        }
+        if visual_envelope
+        else request
+    )
     async with _running_server(settings, runtime) as base_url:
         async with httpx.AsyncClient(
             base_url=base_url,
@@ -139,7 +154,7 @@ async def test_real_mtls_separates_adapter_and_studio_identities(
             trust_env=False,
         ) as adapter_client:
             adapter_ready = await adapter_client.get("/v1/adapter/ready")
-            adapter_result = await adapter_client.post(path, json=request)
+            adapter_result = await adapter_client.post(path, json=adapter_request)
             adapter_cross = await adapter_client.post(
                 "/v1/studio/analyze-request", json={"request": request}
             )
@@ -159,7 +174,7 @@ async def test_real_mtls_separates_adapter_and_studio_identities(
             studio_evaluation = await studio_client.post(
                 "/v1/studio/evaluate-policy", json={"request": request}
             )
-            studio_cross = await studio_client.post(path, json=request)
+            studio_cross = await studio_client.post(path, json=adapter_request)
             studio_admin = await studio_client.get("/v1/actions")
         async with httpx.AsyncClient(
             base_url=base_url,
@@ -167,7 +182,7 @@ async def test_real_mtls_separates_adapter_and_studio_identities(
             trust_env=False,
         ) as unauthorized_client:
             unauthorized_ready = await unauthorized_client.get("/v1/adapter/ready")
-            unauthorized_result = await unauthorized_client.post(path, json=request)
+            unauthorized_result = await unauthorized_client.post(path, json=adapter_request)
         async with httpx.AsyncClient(
             base_url=base_url,
             verify=_client_context(ca_path, None),

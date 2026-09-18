@@ -320,6 +320,61 @@ type SupportedRequest = OpenAIChatRequest | OpenAIResponsesRequest | McpRequest
 SUPPORTED_REQUEST_ADAPTER = TypeAdapter(SupportedRequest)
 
 
+def has_attachments(request: SupportedRequest) -> bool:
+    """Inspect only schema-designated content blocks for raw attachments."""
+    if isinstance(request, OpenAIChatRequest):
+        return any(
+            isinstance(part, AttachmentPart)
+            for message in request.messages
+            if isinstance(message.content, list)
+            for part in message.content
+        )
+    if isinstance(request, OpenAIResponsesRequest) and isinstance(request.input, list):
+        return any(
+            isinstance(part, AttachmentPart)
+            for item in request.input
+            if isinstance(item, ResponseMessage)
+            for part in item.content
+        )
+    return False
+
+
+class FaceFindings(StrictModel):
+    """Describe current-request aggregate face detections without pixels or identities."""
+
+    scan_status: Literal["complete", "not_scanned", "failed"]
+    count: Annotated[int, Field(strict=True, ge=0, le=10_000_000)] | None
+
+    @model_validator(mode="after")
+    def validate_scan(self) -> FaceFindings:
+        """Require a count exactly when the required inspection completed."""
+        if (self.scan_status == "complete") != (self.count is not None):
+            raise ValueError("face count must exist exactly for a complete scan")
+        return self
+
+
+class VisualFindings(StrictModel):
+    """Carry only the visual evidence the trusted document adapter can supply."""
+
+    faces: FaceFindings
+
+
+class DocumentAnalyzeRequest(StrictModel):
+    """Bind trusted visual findings to one converted, text-only model request."""
+
+    api_version: Literal["v1"]
+    request: OpenAIChatRequest | OpenAIResponsesRequest
+    text_pii_enabled: Annotated[bool, Field(strict=True)]
+    visual_findings: VisualFindings
+
+    @model_validator(mode="after")
+    def validate_text_only(self) -> DocumentAnalyzeRequest:
+        """Reject pixels and other raw attachments in a visual envelope."""
+        if has_attachments(self.request):
+            raise ValueError("document envelopes require a converted text-only request")
+        return self
+
+
 class AnalysisMetadata(StrictModel):
     """Describe bounded analysis facts without prompt values."""
 
@@ -371,7 +426,7 @@ class PIIReportRow(StrictModel):
     """Summarize one entity action without retaining detected values."""
 
     entity_type: str = Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")
-    action: PIIAction
+    action: PIIAction | Literal["text-only"]
     detected_count: int = Field(ge=1, le=10_000_000)
     transformed_count: int = Field(ge=0, le=10_000_000)
     unique_transformed_count: int = Field(ge=0, le=10_000_000)
@@ -379,6 +434,11 @@ class PIIReportRow(StrictModel):
     @model_validator(mode="after")
     def validate_counts(self) -> PIIReportRow:
         """Require transformation totals to describe possible executions."""
+        if self.entity_type == "FACE":
+            if self.action not in {"block", "text-only", "reroute"} or self.transformed_count:
+                raise ValueError("FACE rows require a visual action without transformations")
+        elif self.action == "text-only":
+            raise ValueError("text-only is reserved for FACE rows")
         if self.transformed_count > self.detected_count:
             raise ValueError("transformed_count cannot exceed detected_count")
         if self.unique_transformed_count > self.transformed_count:
@@ -421,6 +481,11 @@ class AnalysisResponseBase(StrictModel):
 
     @model_validator(mode="after")
     def validate_unscanned_success(self) -> AnalysisResponseBase:
+        """Validate the caller-specific exception to current-request text scanning."""
+        self._validate_unscanned_success()
+        return self
+
+    def _validate_unscanned_success(self) -> None:
         """Allow unscanned current success only for an MCP call without string arguments."""
         unscanned_current_success = (
             self.analysis.source == "current_request"
@@ -451,13 +516,15 @@ class AnalysisResponseBase(StrictModel):
             or self.notices.response
         ):
             raise ValueError("MCP analysis cannot expose model routing or notices")
-        return self
 
 
 class AdapterAnalyzeResponse(AnalysisResponseBase):
     """Return trusted request-scoped reversal entries to the adapter only."""
 
     report: PIIReport
+    visual_findings: VisualFindings | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     reversal: dict[
         Annotated[
             str,
@@ -469,6 +536,55 @@ class AdapterAnalyzeResponse(AnalysisResponseBase):
         ],
         Annotated[str, Field(min_length=1, max_length=4_000_000)],
     ] = Field(default_factory=dict)
+
+    def _validate_unscanned_success(self) -> None:
+        """Allow visual-only success without weakening the legacy scan contract."""
+        if self.visual_findings is None:
+            super()._validate_unscanned_success()
+            if "FACE" in self.entity_counts:
+                raise ValueError("FACE requires current visual findings")
+            return
+        if self.analysis.source != "current_request" or self.analysis.cached_decision_applied:
+            raise ValueError("visual findings cannot use cached decisions")
+        if not self.analysis.scan_performed:
+            if set(self.entity_counts) - {"FACE"} or self.reversal:
+                raise ValueError(
+                    "unscanned visual results cannot claim text detections or reversal"
+                )
+            expected_actions = (
+                ["block"]
+                if self.decision == "block"
+                else sorted({row.action for row in self.report.rows})
+            )
+            if self.applied_actions != expected_actions:
+                raise ValueError("unscanned visual results can apply only their visual action")
+        self._validate_visual_decision(self.visual_findings.faces)
+
+    def _validate_visual_decision(self, faces: FaceFindings) -> None:
+        """Keep visual evidence, effective actions, and forwarding state consistent."""
+        if self.entity_counts.get("FACE", 0) != (faces.count or 0):
+            raise ValueError("FACE counts must match visual findings")
+        if faces.scan_status == "failed" and self.decision != "block":
+            raise ValueError("failed face inspection requires a block")
+        face_row = next((row for row in self.report.rows if row.entity_type == "FACE"), None)
+        if face_row is not None and (
+            (self.decision == "block" and face_row.action != "block")
+            or face_row.action not in self.applied_actions
+        ):
+            raise ValueError("FACE must report its effective action")
+        if face_row is None and "text-only" in self.applied_actions:
+            raise ValueError("text-only requires a FACE row")
+        if self.decision == "block":
+            if self.request is not None or self.route_class is not None or self.reversal:
+                raise ValueError("visual blocks cannot carry forwarding or reversal state")
+        elif not isinstance(self.request, (OpenAIChatRequest, OpenAIResponsesRequest)) or (
+            has_attachments(self.request)
+        ):
+            raise ValueError("visual success requires a text-only model request")
+        if self.remote_allowed != (self.decision not in {"block", "reroute"}):
+            raise ValueError("visual decision and remote permission disagree")
+        if self.decision == "reroute" and not self.route_class:
+            raise ValueError("visual reroute requires a route")
 
     @model_validator(mode="after")
     def validate_report(self) -> AdapterAnalyzeResponse:
@@ -510,7 +626,8 @@ class AdapterAnalyzeResponse(AnalysisResponseBase):
                 raise ValueError("pass decisions require pass report rows")
         elif self.decision == "apply_actions":
             if actions & {"block", "reroute"} or not any(
-                row.transformed_count for row in self.report.rows
+                row.transformed_count or (row.entity_type == "FACE" and row.action == "text-only")
+                for row in self.report.rows
             ):
                 raise ValueError("action decisions require transformed non-terminal report rows")
         elif self.decision == "reroute":

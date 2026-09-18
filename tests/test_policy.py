@@ -6,7 +6,7 @@ import re
 
 import pytest
 
-from pii_engine.config.policy import PolicySettings, RoutingSettings
+from pii_engine.config.policy import AttachmentsSettings, PolicySettings, RoutingSettings
 from pii_engine.lib.actions import ACTION_BY_NAME
 from pii_engine.services.analyzer import EntityMatch
 from pii_engine.services.anonymizer import TestAnonymizer
@@ -218,3 +218,56 @@ def test_routing_targets_are_bounded_and_unambiguous() -> None:
         RoutingSettings.model_validate(
             {"defaultTarget": "missing", "targets": [{"name": "local/safe"}]}
         )
+
+
+@pytest.mark.parametrize(
+    "faces",
+    [
+        {},
+        {"action": "block"},
+        {"action": "text-only"},
+        {"action": "reroute"},
+        {"action": "reroute", "routeClass": "local/safe"},
+    ],
+)
+def test_face_policy_keeps_raw_attachments_blocked(faces) -> None:
+    settings = AttachmentsSettings.model_validate({"faces": faces})
+    assert settings.policy == "block"
+    assert settings.faces.action == faces.get("action", "block")
+    assert settings.faces.route_class == faces.get("routeClass")
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"attachments": {"policy": "text-only"}},
+        {"attachments": {"faces": {"action": "pass"}}},
+        {"attachments": {"faces": {"action": "mask"}}},
+        {"attachments": {"faces": {"action": "text-only", "routeClass": "local"}}},
+        {"attachments": {"faces": {"routeClass": "local"}}},
+        {"attachments": {"faces": {"action": "reroute", "routeClass": "bad route"}}},
+        {"attachments": {"faces": {"action": "reroute", "routeClass": "x" * 129}}},
+        {"attachments": {"faces": {"unknown": True}}},
+        {"pii": {"entityPolicies": [{"entityType": "FACE", "action": "block"}]}},
+        {"pii": {"entityPolicies": [{"entityType": "PERSON", "action": "text-only"}]}},
+        {"pii": {"analyzerEntities": ["FACE"]}},
+        {
+            "pii": {
+                "customRecognizers": [
+                    {
+                        "name": "face",
+                        "entity": "FACE",
+                        "regex": "face",
+                        "supportedLanguages": ["en"],
+                    }
+                ]
+            }
+        },
+    ],
+)
+def test_face_policy_rejects_invalid_settings_and_text_recognizers(updates) -> None:
+    raw = _policy("mask").model_dump(by_alias=True)
+    for section, values in updates.items():
+        raw[section].update(values)
+    with pytest.raises(ValueError):
+        PolicySettings.model_validate(raw)

@@ -24,6 +24,7 @@ from pii_engine.models.contracts import (
     AnalysisErrorMessage,
     AnalysisErrorResponse,
     AnalysisMetadata,
+    DocumentAnalyzeRequest,
     Notices,
     OpenAIChatRequest,
     OpenAIResponsesRequest,
@@ -200,14 +201,19 @@ async def analyze_adapter(
     responses=_ANALYSIS_ERROR_RESPONSES,
 )
 async def analyze_document_adapter(
-    request: OpenAIChatRequest | OpenAIResponsesRequest,
+    request: OpenAIChatRequest | OpenAIResponsesRequest | DocumentAnalyzeRequest,
     caller: Caller = Depends(adapter_identity),
 ) -> Response:
     """Analyze the whole extracted-text request once, without session reuse or persistence."""
     # PII split across separate lines or table cells may be missed; improve this later.
     try:
         result = await get_runtime().analyze(caller, request, request_scoped=True)
-        return _adapter_response(result, caller, debug_details=False)
+        return _adapter_response(
+            result,
+            caller,
+            debug_details=False,
+            document=request if isinstance(request, DocumentAnalyzeRequest) else None,
+        )
     except AnalysisAPIError:
         raise
     except Exception as exc:  # noqa: BLE001 - document failures must never log content.
@@ -217,10 +223,19 @@ async def analyze_document_adapter(
 
 
 def _adapter_response(
-    result: PolicyResult, caller: Caller, *, debug_details: bool = True
+    result: PolicyResult,
+    caller: Caller,
+    *,
+    debug_details: bool = True,
+    document: DocumentAnalyzeRequest | None = None,
 ) -> Response:
     """Validate and bound the complete adapter response before returning any content."""
     settings = get_runtime().settings
+    if document is not None and (
+        (result.scan_performed and not document.text_pii_enabled)
+        or (not result.scan_performed and document.text_pii_enabled and result.decision != "block")
+    ):
+        raise analysis_api_error("internal_error")
     try:
         response = AdapterAnalyzeResponse(
             api_version="v1",
@@ -235,6 +250,7 @@ def _adapter_response(
             notices=_notices(result),
             safety_rule=result.safety_rule,
             report=PIIReport(rows=result.report_rows),
+            visual_findings=document.visual_findings if document is not None else None,
             reversal=result.reversal,
         )
         content = response.model_dump_json(by_alias=True).encode("utf-8")
