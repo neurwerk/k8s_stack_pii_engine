@@ -29,7 +29,13 @@ from pii_engine.metrics import (
     runtime_analyzer_mode,
     runtime_device,
 )
-from pii_engine.models.contracts import JsonValue, McpRequest, OpenAIChatRequest, SupportedRequest
+from pii_engine.models.contracts import (
+    DocumentAnalyzeRequest,
+    JsonValue,
+    McpRequest,
+    OpenAIChatRequest,
+    SupportedRequest,
+)
 from pii_engine.models.studio import EvaluationIssueStage, PolicyEvaluationIssue
 from pii_engine.services.analyzer import (
     configure_inference_device,
@@ -50,6 +56,7 @@ _MAX_EVALUATION_ISSUES = 128
 _POLICY_PATH_COMPONENTS = {
     "pii",
     "attachments",
+    "faces",
     "safety",
     "classifier",
     "session",
@@ -193,14 +200,19 @@ class EngineRuntime:
     async def analyze(
         self,
         caller: str,
-        request: SupportedRequest,
+        request: SupportedRequest | DocumentAnalyzeRequest,
         session_key: str | None = None,
         policy_override: PolicyOverride | None = None,
         *,
         request_scoped: bool = False,
     ) -> PolicyResult:
         """Use the shared bounded queue, optionally without session state or stable aliases."""
-        validate_request_structure(request, self.settings.max_nesting_depth)
+        if isinstance(request, DocumentAnalyzeRequest) and (
+            caller != "adapter" or not request_scoped
+        ):
+            raise ValueError("visual findings require request-scoped document adapter analysis")
+        model_request = request.request if isinstance(request, DocumentAnalyzeRequest) else request
+        validate_request_structure(model_request, self.settings.max_nesting_depth)
         if not await self.ready():
             raise RuntimeNotReadyError("policy runtime is not ready")
         if policy_override is not None and caller != "studio":
@@ -211,7 +223,7 @@ class EngineRuntime:
             else self.policy_settings
         )
         policy = self._policy_service(active_policy) if policy_override is not None else self.policy
-        request_kind = _request_kind(request)
+        request_kind = _request_kind(model_request)
         validated_session_key = None if request_scoped else _validated_session_key(session_key)
         placeholder_namespace = (
             _conversation_placeholder_namespace(
@@ -229,7 +241,7 @@ class EngineRuntime:
             if request_scoped
             else await self._cached_decision(caller, session_key, request_kind)
         )
-        cached_result = self._final_cached_result(request, cached, active_policy)
+        cached_result = self._final_cached_result(model_request, cached, active_policy)
         if cached_result is not None:
             self._validate_result_kind(cached_result, request_kind)
             self._record_result(caller, cached_result)
@@ -249,13 +261,14 @@ class EngineRuntime:
             done, _pending = await asyncio.wait(
                 {task, started_waiter}, return_when=asyncio.FIRST_COMPLETED
             )
-            if task in done:
-                result = task.result()
-            else:
-                result = await asyncio.wait_for(
+            result = (
+                task.result()
+                if task in done
+                else await asyncio.wait_for(
                     asyncio.shield(task),
                     timeout=self._analysis_timeout(caller, active_policy),
                 )
+            )
         except AnalysisCapacityError as exc:
             reason = "full" if "full" in str(exc) else "timeout"
             queue_rejections_total.labels(caller=caller, reason=reason).inc()
@@ -400,7 +413,7 @@ class EngineRuntime:
         self,
         caller: str,
         policy: PolicyService,
-        request: SupportedRequest,
+        request: SupportedRequest | DocumentAnalyzeRequest,
         started: asyncio.Event,
         *,
         placeholder_namespace: str | None = None,

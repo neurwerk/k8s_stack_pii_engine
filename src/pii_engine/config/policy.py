@@ -50,6 +50,8 @@ class EntityPolicy(PolicyModel):
     @model_validator(mode="after")
     def validate_action(self) -> EntityPolicy:
         """Validate action-specific fields and every configured regex."""
+        if self.entity_type == "FACE":
+            raise ValueError("FACE is reserved for trusted visual findings")
         if self.action not in ACTION_BY_NAME:
             raise ValueError(f"unsupported entity action: {self.action}")
         if self.route_class is not None and self.action != "reroute":
@@ -89,6 +91,8 @@ class CustomRecognizer(PolicyModel):
     @model_validator(mode="after")
     def compile_regex(self) -> CustomRecognizer:
         """Fail startup instead of silently skipping an invalid recognizer."""
+        if self.entity == "FACE":
+            raise ValueError("FACE is reserved for trusted visual findings")
         try:
             re.compile(self.regex)
         except re.error as exc:
@@ -121,6 +125,8 @@ class PiiSettings(PolicyModel):
     @model_validator(mode="after")
     def validate_catalog_selection(self) -> PiiSettings:
         """Reject duplicate policies, unsupported languages, and invalid defaults."""
+        if "FACE" in self.analyzer_entities:
+            raise ValueError("FACE is reserved for trusted visual findings")
         if self.default_action not in ACTION_BY_NAME:
             raise ValueError("unsupported default action")
         if not set(self.analyzer_languages).issubset(self.supported_languages):
@@ -143,10 +149,27 @@ class PiiSettings(PolicyModel):
         return self
 
 
+class FaceSettings(PolicyModel):
+    """Choose an action for aggregate adapter-owned face detections, not identities."""
+
+    action: Literal["block", "text-only", "reroute"] = "block"
+    route_class: str | None = Field(
+        default=None, alias="routeClass", max_length=128, pattern=r"^[A-Za-z0-9_.:/-]+$"
+    )
+
+    @model_validator(mode="after")
+    def validate_route(self) -> FaceSettings:
+        """Allow a route selector only for a face reroute."""
+        if self.route_class is not None and self.action != "reroute":
+            raise ValueError("routeClass is valid only for reroute")
+        return self
+
+
 class AttachmentsSettings(PolicyModel):
-    """Configure unsupported attachment handling."""
+    """Block raw attachments and select policy for trusted visual findings."""
 
     policy: Literal["block"] = "block"
+    faces: FaceSettings = Field(default_factory=FaceSettings)
 
 
 class SafetyRuleEntry(PolicyModel):

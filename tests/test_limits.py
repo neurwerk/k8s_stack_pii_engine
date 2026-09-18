@@ -159,6 +159,33 @@ def test_semantic_aggregate_accepts_4m_characters_and_rejects_one_more() -> None
         runtime.policy._validate_bounds([TextLeaf(("input",), "x" * (MAX_TEXT_CHARACTERS + 1))])
 
 
+@pytest.mark.parametrize("text_enabled", [False, True])
+@pytest.mark.parametrize(
+    "setting,limit,payload,expected",
+    [
+        ("max_text_characters", 3, {"input": "long"}, 413),
+        ("max_text_leaves", 1, {"input": "one", "instructions": "two"}, 413),
+        ("max_text_leaves", 1, {"messages": [{"role": "user", "content": None}]}, 400),
+    ],
+)
+async def test_visual_envelope_cannot_bypass_request_limits(
+    client, setting, limit, payload, expected, text_enabled
+) -> None:
+    runtime = get_runtime()
+    setattr(runtime.settings, setting, limit)
+    response = await client.post(
+        "/v1/adapter/analyze-document-request",
+        json={
+            "api_version": "v1",
+            "request": {"model": "test", **payload},
+            "text_pii_enabled": text_enabled,
+            "visual_findings": {"faces": {"scan_status": "complete", "count": 1}},
+        },
+    )
+    assert response.status_code == expected
+    assert "request" not in response.json() and "reversal" not in response.json()
+
+
 @pytest.mark.parametrize(
     "factory",
     [

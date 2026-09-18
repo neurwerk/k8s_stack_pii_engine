@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from pii_engine.config.policy import PolicySettings
 from pii_engine.config.settings import Settings
-from pii_engine.models.contracts import McpRequest, OpenAIChatRequest
+from pii_engine.models.contracts import DocumentAnalyzeRequest, McpRequest, OpenAIChatRequest
 from pii_engine.runtime import EngineRuntime, set_runtime
 from pii_engine.services.session import SessionDecision, SessionStore
 
@@ -115,6 +115,7 @@ def test_session_decision_accepts_consistent_terminal_reports(payload: dict[str,
         _session_decision("block", [_report_row("EMAIL_ADDRESS", "mask", 1)]),
         _session_decision("block", [_report_row("VAT_NUMBER", "pass")]),
         _session_decision("reroute", [_report_row("EMAIL_ADDRESS", "mask", 1)]),
+        _session_decision("block", [_report_row("FACE", "block")]),
         _session_decision(
             "reroute",
             [
@@ -127,6 +128,7 @@ def test_session_decision_accepts_consistent_terminal_reports(payload: dict[str,
         "block-with-transformation",
         "pii-block-without-block-row",
         "reroute-without-reroute-row",
+        "visual-findings-cannot-be-cached",
         "reroute-with-block-row",
     ],
 )
@@ -283,8 +285,9 @@ async def test_non_tainting_actions_never_create_session_state() -> None:
     assert redis.values == {}
 
 
+@pytest.mark.parametrize("visual_envelope", [False, True])
 async def test_reversible_placeholders_are_stable_only_within_one_adapter_session(
-    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, visual_envelope: bool
 ) -> None:
     """Tool continuations retain aliases without making conversations linkable."""
     runtime, redis = _runtime()
@@ -333,7 +336,7 @@ async def test_reversible_placeholders_are_stable_only_within_one_adapter_sessio
     monkeypatch.setattr(runtime.policy, "analyze", analyze)
     path = "/v1/adapter/analyze-document-request"
     for field, part_type in (("messages", "text"), ("input", "input_text")):
-        payload = {
+        payload: dict[str, object] = {
             "model": "test",
             field: [
                 {"role": "user", "content": [{"type": part_type, "text": "a@example.com"}]},
@@ -347,6 +350,14 @@ async def test_reversible_placeholders_are_stable_only_within_one_adapter_sessio
             ],
         }
         previous_reversal = scoped.reversal
+        if visual_envelope:
+            runtime.policy_settings.attachments.faces.action = "text-only"
+            payload = {
+                "api_version": "v1",
+                "request": payload,
+                "text_pii_enabled": True,
+                "visual_findings": {"faces": {"scan_status": "complete", "count": 1}},
+            }
         for headers in ({"x-pii-session-key": "1" * 64}, {}):
             analyze.reset_mock()
             response = await client.post(path, json=payload, headers=headers)
@@ -357,7 +368,11 @@ async def test_reversible_placeholders_are_stable_only_within_one_adapter_sessio
             assert body["analysis"]["scan_performed"] is True
             assert body["analysis"]["cached_decision_applied"] is False
             assert body["analysis"]["text_leaf_count"] == 3
-            assert body["entity_counts"] == {"EMAIL_ADDRESS": 3}
+            assert body["entity_counts"] == {
+                "EMAIL_ADDRESS": 3,
+                **({"FACE": 1} if visual_envelope else {}),
+            }
+            assert ("visual_findings" in body) is visual_envelope
             placeholder = next(iter(body["reversal"]))
             assert body["reversal"] == {placeholder: "a@example.com"}
             assert body["reversal"] != previous_reversal
@@ -368,6 +383,17 @@ async def test_reversible_placeholders_are_stable_only_within_one_adapter_sessio
             assert body["report"]["rows"][0]["unique_transformed_count"] == 1
             analyze.assert_called_once()
             previous_reversal = body["reversal"]
+
+        if visual_envelope:
+            payload["text_pii_enabled"] = False
+            runtime.policy_settings.attachments.faces.action = "reroute"
+            response = await client.post(path, json=payload)
+            assert response.status_code == 200
+            assert response.json()["decision"] == "reroute"
+            document = DocumentAnalyzeRequest.model_validate(payload)
+            for caller, scoped_request in (("studio", True), ("adapter", False)):
+                with pytest.raises(ValueError, match="document adapter"):
+                    await runtime.analyze(caller, document, request_scoped=scoped_request)
 
 
 async def test_session_payload_contains_no_request_or_reversal_material() -> None:

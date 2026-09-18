@@ -27,7 +27,7 @@ components.
 ## Document Request API
 
 `POST /v1/adapter/analyze-document-request` requires the adapter mTLS identity.
-Its body is an existing `OpenAIChatRequest` or `OpenAIResponsesRequest`: the whole
+Its legacy body is an existing `OpenAIChatRequest` or `OpenAIResponsesRequest`: the whole
 conversation with extracted document text and any retained metadata already in
 model-visible text parts, not raw Docling JSON. Typed attachments produce the
 existing policy `block` with no request content or reversal; MCP is invalid here.
@@ -40,6 +40,53 @@ the adapter response byte limit remain shared. Failures return no partial result
 and exception details are suppressed even at `DEBUG`. No cross-line or table-cell
 reconstruction is performed, so split PII may be missed. Existing adapter, MCP,
 and Studio routes are unchanged.
+
+The document endpoint also accepts this strict, adapter-owned envelope:
+
+```json
+{
+  "api_version": "v1",
+  "request": {"model": "example", "input": "Converted attachment text"},
+  "text_pii_enabled": true,
+  "visual_findings": {"faces": {"scan_status": "complete", "count": 2}}
+}
+```
+
+All envelope fields are required; unknown fields are rejected. `request` must
+be a normal text-only Chat or Responses payload. Only trusted extProc constructs
+the findings, never a public caller, Studio or MCP. Engine receives no pixels,
+face identities or fabricated `PERSON` entities. Images without OCR text use an
+adapter-generated fixed text marker. A complete face scan requires a strict
+integer count from 0 through 10,000,000; `failed` and `not_scanned` require null.
+`failed` blocks the request. `not_scanned` means face protection was deliberately
+disabled and does not evaluate face policy. Findings are never cached.
+
+`text_pii_enabled` is a strict boolean. When false, text PII scanning,
+transformations and classification are skipped, but request bounds, safety
+checks and face policy still apply. Scan metadata remains truthful:
+`scan_performed: false` and `duration_ms: null` describe skipped text scanning.
+Envelope replies echo `visual_findings`; legacy replies omit that field entirely.
+
+Face policy is separate from text entity policies and recognizers, where `FACE`
+is reserved:
+
+```yaml
+attachments:
+  policy: block
+  faces:
+    action: block # block (default), text-only, or reroute
+    # routeClass: local/safe # permitted only for reroute
+```
+
+An omitted reroute class uses `routing.defaultTarget`. Face blocks and failed
+inspection stop processing before text transformations. Text blocks always win;
+conflicting text and face reroute classes block instead of choosing one. Positive
+counts produce one aggregate `FACE` report row and matching entity counts, with
+zero transformations. Its effective action is `block` on any overall block,
+otherwise `text-only` or `reroute`; zero or unknown counts produce no face row.
+Face-only `text-only` returns `apply_actions`, the text request and
+`applied_actions: ["text-only"]`, not a new decision. extProc owns image removal
+and safe route enforcement; this policy does not grant image forwarding.
 
 ## Configuration
 
