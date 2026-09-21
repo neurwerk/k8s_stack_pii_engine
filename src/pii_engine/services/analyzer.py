@@ -267,6 +267,7 @@ class PresidioAnalyzer:
             supported_languages=list(self.policy.pii.supported_languages),
         )
         engine.registry.remove_recognizer("TransformersRecognizer")
+        engine.registry.remove_recognizer("EmailRecognizer")
         for language in self.policy.pii.supported_languages:
             engine.registry.add_recognizer(
                 normalized_transformers_recognizer(list(ENTITY_CATALOG), language)
@@ -357,6 +358,7 @@ class PresidioSpacyAnalyzer:
             nlp_engine=nlp_engine,
             supported_languages=list(self.policy.pii.supported_languages),
         )
+        engine.registry.remove_recognizer("EmailRecognizer")
         recognizers = normalized_recognizers(tuple(self.policy.pii.supported_languages))
         recognizers.extend(custom_recognizers(self.policy.pii.custom_recognizers))
         for recognizer in recognizers:

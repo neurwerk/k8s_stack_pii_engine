@@ -110,14 +110,18 @@ def test_production_runtime_uses_spacy_baseline_without_test_analyzer(tmp_path: 
     assert isinstance(runtime._analyzer, PresidioSpacyAnalyzer)
 
 
-def test_spacy_baseline_normalizes_financial_entities() -> None:
+def test_spacy_baseline_normalizes_financial_entities(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_network(*args, **kwargs):
+        raise AssertionError("PII recognition must not download suffix data")
+
+    monkeypatch.setattr("requests.sessions.Session.request", no_network)
     policy = make_test_policy()
     policy.pii.supported_languages = ["en"]
     policy.pii.analyzer_languages = ["en"]
-    policy.pii.analyzer_entities = ["IBAN", "CREDIT_CARD_NUMBER"]
-    text = "IBAN GB82WEST12345698765432 and card 4111 1111 1111 1111"
+    policy.pii.analyzer_entities = ["IBAN", "CREDIT_CARD_NUMBER", "EMAIL_ADDRESS"]
+    text = "IBAN GB82WEST12345698765432 and card 4111 1111 1111 1111; test@example.com"
     entities = {match.entity_type for match in PresidioSpacyAnalyzer(policy).analyze(text)}
-    assert entities == {"IBAN", "CREDIT_CARD_NUMBER"}
+    assert entities == {"IBAN", "CREDIT_CARD_NUMBER", "EMAIL_ADDRESS"}
 
 
 def test_spacy_mapped_and_ignored_labels_cover_bundled_models() -> None:

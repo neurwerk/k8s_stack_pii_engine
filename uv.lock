@@ -585,7 +585,7 @@ wheels = [
 
 [[package]]
 name = "neurwerk-pii-engine"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
@@ -601,6 +601,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pyyaml" },
     { name = "redis" },
+    { name = "tldextract" },
     { name = "transformers" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -643,6 +644,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "redis", specifier = ">=5,<7" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11" },
+    { name = "tldextract", specifier = "==5.3.2" },
     { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'cu124'", specifier = "==2.6.0", index = "https://download.pytorch.org/whl/cu124", conflict = { package = "neurwerk-pii-engine", extra = "cu124" } },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'cpu'", specifier = "==2.6.0", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "neurwerk-pii-engine", extra = "cpu" } },
     { name = "torch", marker = "sys_platform != 'linux' and extra == 'cpu'", specifier = "==2.6.0" },
