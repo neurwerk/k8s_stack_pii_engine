@@ -30,6 +30,7 @@ def normalized_recognizers(languages: tuple[str, ...]) -> list[Any]:
     for language in languages:
         recognizers.extend(
             [
+                _offline_email_recognizer(language),
                 _bsn_recognizer(language),
                 PatternRecognizer(
                     supported_entity="POSTAL_CODE",
@@ -73,6 +74,22 @@ def normalized_recognizers(languages: tuple[str, ...]) -> list[Any]:
             ]
         )
     return recognizers
+
+
+def _offline_email_recognizer(language: str) -> Any:  # noqa: ANN401
+    """Use the packaged suffix snapshot without network calls or writable cache."""
+    from presidio_analyzer.predefined_recognizers import EmailRecognizer
+    from tldextract import TLDExtract
+
+    extract = TLDExtract(suffix_list_urls=(), cache_dir=None)
+
+    class OfflineEmailRecognizer(EmailRecognizer):
+        def validate_result(self, pattern_text: str) -> bool:
+            return extract(pattern_text).fqdn != ""
+
+    recognizer = OfflineEmailRecognizer(supported_language=language)
+    recognizer.name = "EmailRecognizer"
+    return recognizer
 
 
 def custom_recognizers(definitions: list[CustomRecognizer]) -> list[Any]:
