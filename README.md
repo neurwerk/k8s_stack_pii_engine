@@ -131,7 +131,7 @@ make check
 ```
 
 This runs the frozen-lock check, Ruff lint/format checks, `ty` type checking,
-and pytest with the configured coverage threshold. `make benchmark` runs the
+and pytest with an informational coverage report. `make benchmark` runs the
 synthetic benchmark separately. `make build` creates a local CPU image and is
 not part of validation.
 
