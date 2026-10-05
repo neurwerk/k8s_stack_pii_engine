@@ -10,7 +10,7 @@ Snapshot includes only `pyproject.toml`, `README.md`, `LICENSE`, and `src/**/*.p
 The final canonical source includes configurable extraction depth, strict direct
 models, MCP omission-preserving schemas, and provider-owned token-limit controls.
 
-Source SHA-256: `2a7006a9c37f73b4f0f96d7b973dee8ea132c880da1d0fe81d85680b61377a89`.
+Source SHA-256: `7e9f93666ee15d8a0cb4daf16982ae379695911496b710c17cd74fdb91d1434b`.
 For each relative POSIX path in sorted order, hash its UTF-8 bytes, a NUL byte,
 the file bytes, and another NUL byte. Exclude this consumer provenance file.
 

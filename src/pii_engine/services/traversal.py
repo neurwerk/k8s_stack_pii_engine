@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from neurwerk_request_segments import ExtractedRequest, ExtractionLimitError, extract_request
 from neurwerk_request_segments import TextSegment as SharedTextSegment
+from neurwerk_request_segments.models import EngineResponsesRequest
 
 from pii_engine.models.contracts import (
     DocumentAnalyzeRequest,
     LimitDetail,
     McpJsonValue,
     McpRequest,
+    OpenAIResponsesRequest,
     SegmentRequest,
     SupportedRequest,
     TextSegment,
+    ToolDefinition,
 )
 from pii_engine.services.errors import AnalysisRequestTooLargeError, InvalidAnalysisRequestError
 
@@ -35,9 +39,67 @@ class TextLeaf:
     text: str
 
 
-def _extract(request: SupportedRequest, max_depth: int = 32) -> ExtractedRequest:
+@dataclass(frozen=True)
+class LegacyResponsesExtraction:
+    """Translate only the v1 nested tool envelope around canonical extraction."""
+
+    extracted: ExtractedRequest
+    nested_tools: frozenset[int]
+
+    @property
+    def segments(self) -> list[SharedTextSegment]:
+        """Expose canonical segment identities and text."""
+        return self.extracted.segments
+
+    @property
+    def request_kind(self) -> Literal["responses"]:
+        """Identify the Responses endpoint."""
+        return "responses"
+
+    @property
+    def attachments_present(self) -> bool:
+        """Expose the canonical attachment finding."""
+        return self.extracted.attachments_present
+
+    def diagnostic_path(self, segment_id: str) -> tuple[PathPart, ...]:
+        """Restore the original nested tool path for legacy diagnostics."""
+        path = self.extracted.diagnostic_path(segment_id)
+        if len(path) > 2 and path[0] == "tools" and path[1] in self.nested_tools:
+            return (*path[:2], "function", *path[2:])
+        return path
+
+    def rebuild(self, segments: Sequence[SharedTextSegment]) -> OpenAIResponsesRequest:
+        """Rebuild transformed text before restoring each original tool envelope."""
+        data = self.extracted.rebuild(segments).model_dump(by_alias=True, exclude_unset=True)
+        for index in self.nested_tools:
+            tool = data["tools"][index]
+            data["tools"][index] = {
+                "type": tool["type"],
+                "function": {key: value for key, value in tool.items() if key != "type"},
+            }
+        return OpenAIResponsesRequest.model_validate(data)
+
+
+type LegacyExtraction = ExtractedRequest | LegacyResponsesExtraction
+
+
+def _extract(request: SupportedRequest, max_depth: int = 32) -> LegacyExtraction:
     validate_request_structure(request, max_depth)
     try:
+        if isinstance(request, OpenAIResponsesRequest):
+            data = request.model_dump(by_alias=True, exclude_unset=True)
+            nested = frozenset(
+                index
+                for index, tool in enumerate(request.tools or [])
+                if isinstance(tool, ToolDefinition)
+            )
+            for index in nested:
+                tool = data["tools"][index]
+                data["tools"][index] = {"type": tool["type"], **tool["function"]}
+            canonical = EngineResponsesRequest.model_validate(data)
+            return LegacyResponsesExtraction(
+                extract_request(canonical, max_depth=max_depth), nested
+            )
         return extract_request(request, max_depth=max_depth)
     except ExtractionLimitError as exc:
         raise AnalysisRequestTooLargeError(
@@ -61,7 +123,7 @@ def legacy_segments(
     max_depth: int = 32,
     *,
     request_scoped: bool = False,
-) -> tuple[SegmentRequest, ExtractedRequest]:
+) -> tuple[SegmentRequest, LegacyExtraction]:
     """Translate a provider request once at the legacy boundary."""
     document = request if isinstance(request, DocumentAnalyzeRequest) else None
     model = cast(SupportedRequest, document.request if document is not None else request)
@@ -76,11 +138,14 @@ def legacy_segments(
     ), extracted
 
 
-def restore_legacy_result(result: PolicyResult, extracted: ExtractedRequest) -> None:
+def restore_legacy_result(result: PolicyResult, extracted: LegacyExtraction) -> None:
     """Reconstruct legacy output and diagnostic paths locally."""
     if result.segments is not None:
-        result.request = extracted.rebuild(
-            [SharedTextSegment(id=item.id, text=item.text) for item in result.segments]
+        result.request = cast(
+            SupportedRequest,
+            extracted.rebuild(
+                [SharedTextSegment(id=item.id, text=item.text) for item in result.segments]
+            ),
         )
     paths = {item.id: extracted.diagnostic_path(item.id) for item in extracted.segments}
     bounded_paths = {
@@ -115,11 +180,14 @@ def replace_text_leaves(
     paths = {item.id: extracted.diagnostic_path(item.id) for item in extracted.segments}
     if replacements.keys() - set(paths.values()):
         raise InvalidAnalysisRequestError("replacement path is not model-visible text")
-    return extracted.rebuild(
-        [
-            SharedTextSegment(id=item.id, text=replacements.get(paths[item.id], item.text))
-            for item in extracted.segments
-        ]
+    return cast(
+        SupportedRequest,
+        extracted.rebuild(
+            [
+                SharedTextSegment(id=item.id, text=replacements.get(paths[item.id], item.text))
+                for item in extracted.segments
+            ]
+        ),
     )
 
 

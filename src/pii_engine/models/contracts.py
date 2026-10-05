@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import Annotated, Literal
 
 from neurwerk_request_segments import models as provider
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_serializer, model_validator
 
-# Legacy names are aliases, never separately maintained provider definitions.
+# Reuse canonical provider definitions; only the legacy Responses tool envelope differs.
 AttachmentPart = provider.EngineAttachmentPart
 OpenAIChatRequest = provider.EngineChatRequest
 ChatStreamOptions = provider.EngineChatStreamOptions
@@ -21,7 +21,6 @@ ResponseFunctionOutput = provider.EngineResponseFunctionOutput
 ResponseInput = provider.EngineResponseInput
 ResponseInputItem = provider.EngineResponseInputItem
 ResponseMessage = provider.EngineResponseMessage
-OpenAIResponsesRequest = provider.EngineResponsesRequest
 ResponseTextConfig = provider.EngineResponseTextConfig
 ResponseTextFormat = provider.EngineResponseTextFormat
 ResponseFormatJsonObject = provider.EngineResponseTextFormatObject
@@ -35,7 +34,17 @@ ToolFunction = provider.EngineToolFunction
 type JsonValue = provider.JsonValue
 type McpJsonValue = provider.McpJsonValue
 type McpRequestId = provider.McpRequestId
-type SupportedRequest = provider.SupportedRequest
+
+
+class OpenAIResponsesRequest(provider.EngineResponsesRequest):
+    """Retain nested function tools accepted by the legacy v1 boundary."""
+
+    tools: list[provider.EngineResponseToolDefinition | ToolDefinition] | None = Field(
+        default_factory=list, max_length=128
+    )
+
+
+type SupportedRequest = OpenAIChatRequest | OpenAIResponsesRequest | McpRequest
 
 type AnalysisErrorCode = Literal[
     "invalid_request",
@@ -335,6 +344,13 @@ class AnalysisResponseBase(StrictModel):
     analysis: AnalysisMetadata
     notices: Notices
     safety_rule: str | None = Field(default=None, max_length=128)
+
+    @field_serializer("request")
+    def serialize_request(self, request: SupportedRequest | None) -> dict[str, object] | None:
+        """Keep omitted provider fields out of the legacy wire response."""
+        if request is None:
+            return None
+        return request.model_dump(mode="json", by_alias=True, exclude_unset=True)
 
     @model_validator(mode="after")
     def validate_unscanned_success(self) -> AnalysisResponseBase:
