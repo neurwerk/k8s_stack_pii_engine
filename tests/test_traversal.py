@@ -13,6 +13,7 @@ from pii_engine.models.contracts import (
     OpenAIResponsesRequest,
 )
 from pii_engine.runtime import EngineRuntime
+from pii_engine.services.errors import InvalidAnalysisRequestError
 from pii_engine.services.traversal import iter_text_leaves, replace_text_leaves
 
 
@@ -157,6 +158,7 @@ def test_nested_tool_argument_is_sanitized() -> None:
     runtime = EngineRuntime(Settings(allow_test_analyzer=True, enforce_client_identity=False))
     result = runtime.policy.analyze(request)
     assert isinstance(result.request, OpenAIChatRequest)
+    assert result.request.messages[0].tool_calls is not None
     assert result.request.messages[0].tool_calls[0].function.arguments == {"query": "*************"}
 
 
@@ -185,6 +187,7 @@ def test_stringified_tool_arguments_remain_valid_protocol_json() -> None:
     runtime = EngineRuntime(Settings(allow_test_analyzer=True))
     result = runtime.policy.analyze(request)
     assert isinstance(result.request, OpenAIChatRequest)
+    assert result.request.messages[0].tool_calls is not None
     arguments = result.request.messages[0].tool_calls[0].function.arguments
     assert isinstance(arguments, str)
     assert json.loads(arguments) == {"query": "*************", "limit": 2}
@@ -387,7 +390,7 @@ def test_invalid_stringified_tool_arguments_fail_closed() -> None:
             ],
         }
     )
-    with pytest.raises(ValueError, match="valid JSON"):
+    with pytest.raises(InvalidAnalysisRequestError, match="extraction failed"):
         iter_text_leaves(request)
 
 

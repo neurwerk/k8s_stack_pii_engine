@@ -93,7 +93,6 @@ async def test_chat_stream_usage_control_survives_analysis(
 @pytest.mark.parametrize(
     "updates",
     [
-        {"stream_options": {}},
         {"stream_options": {"include_usage": True, "unknown": "rejected"}},
         {"unknown": "rejected"},
         {"stream_options": {"include_usage": "true"}},
@@ -195,7 +194,7 @@ def test_mcp_optional_objects_preserve_omission_and_empty_objects(
 def _assert_mcp_optional_object_schema(schema: dict[str, object]) -> None:
     definitions = schema["$defs"]
     assert isinstance(definitions, dict)
-    params = definitions["McpParams"]
+    params = definitions["EngineMcpParams"]
     assert isinstance(params, dict)
     properties = params["properties"]
     assert isinstance(properties, dict)
@@ -219,7 +218,9 @@ async def test_openapi_mcp_schemas_do_not_advertise_explicit_null(
     client: httpx.AsyncClient,
 ) -> None:
     schemas = (await client.get("/openapi.json")).json()["components"]["schemas"]
-    params_schemas = [value for name, value in schemas.items() if name.startswith("McpParams")]
+    params_schemas = [
+        value for name, value in schemas.items() if name.startswith("EngineMcpParams")
+    ]
     assert params_schemas
     for params in params_schemas:
         assert params["required"] == ["name"]
@@ -742,11 +743,20 @@ async def test_chunked_body_limit_stops_streaming_allocation(client: httpx.Async
     )
     assert response.status_code == 413, response.text
     assert response.json() == {
-        "api_version": "v1",
+        "api_version": "v2",
         "error": {
             "code": "request_too_large",
             "message": "The analysis request exceeds the configured size limit.",
             "retryable": False,
+            "limit": {
+                "component": "pii_engine",
+                "stage": "admission",
+                "reason": "encoded_bytes",
+                "measured": 6_000_000,
+                "maximum": 5_242_880,
+                "unit": "bytes",
+                "exact": False,
+            },
         },
     }
 
@@ -783,13 +793,20 @@ async def test_analysis_routes_publish_typed_error_responses(client: httpx.Async
         "/v1/adapter/analyze-request",
         "/v1/studio/analyze-request",
         "/v1/studio/evaluate-policy",
+        "/v2/adapter/analyze-segments",
+        "/v2/studio/analyze-segments",
+        "/v2/studio/evaluate-policy",
     ):
         responses = schema["paths"][path]["post"]["responses"]
         assert set(responses) == {"200", "400", "413", "422", "500", "503", "504"}
-        for status in ("400", "413", "500", "503", "504"):
+        for status in ("400", "500", "503", "504"):
             assert responses[status]["content"]["application/json"]["schema"] == {
                 "$ref": "#/components/schemas/AnalysisErrorResponse"
             }
+        assert responses["413"]["content"]["application/json"]["schema"]["anyOf"] == [
+            {"$ref": "#/components/schemas/AnalysisErrorResponse"},
+            {"$ref": "#/components/schemas/AnalysisLimitErrorResponse"},
+        ]
         assert responses["422"]["content"]["application/json"]["schema"] != {
             "$ref": "#/components/schemas/AnalysisErrorResponse"
         }

@@ -7,7 +7,6 @@ import hashlib
 import json
 import threading
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
 import yaml
@@ -18,7 +17,7 @@ from pii_engine.config.policy import test_policy as make_test_policy
 from pii_engine.config.settings import Settings
 from pii_engine.lib.catalog import ENTITY_CATALOG
 from pii_engine.main import _tls_kwargs
-from pii_engine.models.contracts import OpenAIChatRequest
+from pii_engine.models.contracts import ChatMessage, OpenAIChatRequest, SegmentRequest, TextSegment
 from pii_engine.runtime import EngineRuntime
 from pii_engine.services.analyzer import (
     DeterministicAnalyzer,
@@ -414,7 +413,9 @@ async def test_runtime_attaches_bounded_monotonic_scan_duration(
             return next(values)
 
     monkeypatch.setattr(runtime_module, "time", FakeTime)
-    request = OpenAIChatRequest(model="test", messages=[{"role": "user", "content": "hello"}])
+    request = SegmentRequest(
+        request_kind="chat", scope="request", segments=[TextSegment(id="s0", text="hello")]
+    )
 
     result = await runtime._run_analysis("adapter", runtime.policy, request, asyncio.Event())
 
@@ -431,7 +432,7 @@ async def test_masked_reroute_remains_sticky_after_current_request_reprocessing(
     key = "b" * 64
     tainted = OpenAIChatRequest(
         model="test",
-        messages=[{"role": "user", "content": "IBAN DE89370400440532013000"}],
+        messages=[ChatMessage(role="user", content="IBAN DE89370400440532013000")],
     )
     first = await runtime.analyze("adapter", tainted, key)
     assert first.decision == "reroute"
@@ -441,7 +442,7 @@ async def test_masked_reroute_remains_sticky_after_current_request_reprocessing(
     assert "DE89370400440532013000" not in first_content
 
     clean = OpenAIChatRequest(
-        model="test", messages=[{"role": "user", "content": "No identifiers here"}]
+        model="test", messages=[ChatMessage(role="user", content="No identifiers here")]
     )
     second = await runtime.analyze("adapter", clean, key)
     assert second.decision == "reroute"
@@ -484,16 +485,16 @@ def test_tls_kwargs_require_complete_server_identity(tmp_path: Path) -> None:
     assert _tls_kwargs(settings)["ssl_cert_reqs"] != 0
 
 
-async def test_timed_out_worker_retains_shared_capacity() -> None:
+async def test_timed_out_worker_retains_shared_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
     """A timed-out thread cannot release its limiter slot while still running."""
     started = threading.Event()
     release = threading.Event()
 
     class BlockingPolicy:
-        def analyze(self, request: object) -> PolicyResult:
+        def analyze(self, request: SegmentRequest) -> PolicyResult:
             started.set()
             release.wait(timeout=1)
-            return PolicyResult(request=cast(Any, request), decision="pass", remote_allowed=True)
+            return PolicyResult(segments=request.segments, decision="pass", remote_allowed=True)
 
     runtime = EngineRuntime(
         Settings(
@@ -504,8 +505,10 @@ async def test_timed_out_worker_retains_shared_capacity() -> None:
         )
     )
     runtime.policy_settings.pii.timeout = 0.01
-    runtime.policy = cast(Any, BlockingPolicy())
-    request = cast(Any, {"model": "test", "messages": [{"role": "user", "content": "x"}]})
+    monkeypatch.setattr(runtime.policy, "analyze", BlockingPolicy().analyze)
+    request = SegmentRequest(
+        request_kind="chat", scope="request", segments=[TextSegment(id="s0", text="x")]
+    )
     try:
         with pytest.raises(TimeoutError):
             await runtime.analyze("adapter", request)

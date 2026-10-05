@@ -12,6 +12,8 @@ from pii_engine.models.contracts import (
     JsonValue,
     PIIAction,
     PIIReport,
+    SegmentAnalysisResponse,
+    SegmentRequest,
     StrictModel,
     SupportedRequest,
 )
@@ -38,6 +40,35 @@ class StudioPolicyEvaluationRequest(StrictModel):
     simulation: Literal["deterministic_echo"] = "deterministic_echo"
 
 
+class StudioSegmentAnalyzeRequest(StrictModel):
+    """Wrap extracted text with an optional request-local policy preview."""
+
+    request: SegmentRequest
+    policy: PolicyOverride | None = None
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> StudioSegmentAnalyzeRequest:
+        """Do not let Studio request adapter session or visual privileges."""
+        if self.request.scope != "request" or self.request.visual_findings is not None:
+            raise ValueError("Studio requires request-scoped text segments")
+        return self
+
+
+class StudioSegmentPolicyEvaluationRequest(StrictModel):
+    """Evaluate an unvalidated candidate against extracted text."""
+
+    request: SegmentRequest
+    policy: dict[str, JsonValue] | None = Field(default=None, max_length=16)
+    simulation: Literal["deterministic_echo"] = "deterministic_echo"
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> StudioSegmentPolicyEvaluationRequest:
+        """Keep evaluation request-local and independent of adapter visual evidence."""
+        if self.request.scope != "request" or self.request.visual_findings is not None:
+            raise ValueError("Studio requires request-scoped text segments")
+        return self
+
+
 class PolicyEvaluationIssue(StrictModel):
     """Describe one sanitized candidate failure without rejected values."""
 
@@ -56,10 +87,9 @@ class StudioPolicyEvaluationInvalidResponse(StrictModel):
     issues_truncated: bool
 
 
-class LogicalDetection(StrictModel):
+class LogicalDetectionBase(StrictModel):
     """Describe one leaf-local logical detection without matched content."""
 
-    path: list[EvaluationPathPart] = Field(max_length=64)
     start: int = Field(ge=0, le=4_000_000)
     end: int = Field(gt=0, le=4_000_000)
     entity_type: str = Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")
@@ -69,17 +99,28 @@ class LogicalDetection(StrictModel):
     resolved_action: PIIAction
 
     @model_validator(mode="after")
-    def validate_span(self) -> LogicalDetection:
+    def validate_span(self) -> LogicalDetectionBase:
         """Require a non-empty code-point span."""
         if self.end <= self.start:
             raise ValueError("detection end must follow start")
         return self
 
 
-class EffectiveRegion(StrictModel):
-    """Describe one non-overlapping region selected for policy execution."""
+class LogicalDetection(LogicalDetectionBase):
+    """Expose a provider path only to legacy Studio clients."""
 
     path: list[EvaluationPathPart] = Field(max_length=64)
+
+
+class SegmentLogicalDetection(LogicalDetectionBase):
+    """Identify original segment-local offsets without provider metadata."""
+
+    segment_id: str = Field(min_length=1, max_length=128)
+
+
+class EffectiveRegionBase(StrictModel):
+    """Describe one non-overlapping region selected for policy execution."""
+
     start: int = Field(ge=0, le=4_000_000)
     end: int = Field(gt=0, le=4_000_000)
     entity_type: str = Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")
@@ -90,7 +131,7 @@ class EffectiveRegion(StrictModel):
     overlap: bool
 
     @model_validator(mode="after")
-    def validate_region(self) -> EffectiveRegion:
+    def validate_region(self) -> EffectiveRegionBase:
         """Require a non-empty span and deterministic unique member names."""
         if self.end <= self.start:
             raise ValueError("region end must follow start")
@@ -99,6 +140,26 @@ class EffectiveRegion(StrictModel):
         if self.entity_type not in self.member_entity_types:
             raise ValueError("winning entity must be a region member")
         return self
+
+
+class EffectiveRegion(EffectiveRegionBase):
+    """Expose a provider path only to legacy Studio clients."""
+
+    path: list[EvaluationPathPart] = Field(max_length=64)
+
+
+class SegmentEffectiveRegion(EffectiveRegionBase):
+    """Identify an effective region using its original segment ID."""
+
+    segment_id: str = Field(min_length=1, max_length=128)
+
+
+class SegmentEvaluationDiagnostics(StrictModel):
+    """Carry bounded logical and effective segment-local policy evidence."""
+
+    logical_detections: list[SegmentLogicalDetection] = Field(max_length=2_048)
+    effective_regions: list[SegmentEffectiveRegion] = Field(max_length=2_048)
+    truncated: bool
 
 
 class EvaluationDiagnostics(StrictModel):
@@ -146,5 +207,31 @@ class StudioPolicyEvaluationValidResponse(AnalysisResponseBase):
 
 type StudioPolicyEvaluationResponse = Annotated[
     StudioPolicyEvaluationValidResponse | StudioPolicyEvaluationInvalidResponse,
+    Field(discriminator="valid"),
+]
+
+
+class StudioSegmentPolicyEvaluationValidResponse(SegmentAnalysisResponse):
+    """Return model-free evaluation with no provider request or reversal map."""
+
+    valid: Literal[True] = True
+    issues: list[PolicyEvaluationIssue] = Field(default_factory=list, max_length=0)
+    issues_truncated: Literal[False] = False
+    report: PIIReport
+    diagnostics: SegmentEvaluationDiagnostics
+    simulation: EvaluationSimulation
+
+
+class StudioSegmentPolicyEvaluationInvalidResponse(StrictModel):
+    """Return safe policy candidate errors under the v2 envelope."""
+
+    api_version: Literal["v2"] = "v2"
+    valid: Literal[False] = False
+    issues: list[PolicyEvaluationIssue] = Field(min_length=1, max_length=128)
+    issues_truncated: bool
+
+
+type StudioSegmentPolicyEvaluationResponse = Annotated[
+    StudioSegmentPolicyEvaluationValidResponse | StudioSegmentPolicyEvaluationInvalidResponse,
     Field(discriminator="valid"),
 ]

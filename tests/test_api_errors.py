@@ -180,7 +180,7 @@ async def test_validation_logging_contains_only_bounded_safe_diagnostics(
         assert rejected_value not in caplog.text
 
 
-async def test_debug_logging_includes_exception_and_traceback(
+async def test_debug_logging_never_includes_exception_content_or_traceback(
     client: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -194,8 +194,9 @@ async def test_debug_logging_includes_exception_and_traceback(
     caplog.set_level(logging.DEBUG, logger="pii_engine.controllers.api")
     response = await client.post("/v1/adapter/analyze-request", json=_request())
     assert response.status_code == 500
-    assert marker in caplog.text
-    assert "Traceback" in caplog.text
+    assert marker not in caplog.text
+    assert "Traceback" not in caplog.text
+    assert "exception=RuntimeError" in caplog.text
 
 
 def test_log_level_is_validated() -> None:

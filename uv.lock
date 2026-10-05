@@ -593,6 +593,7 @@ dependencies = [
     { name = "en-core-web-sm" },
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "neurwerk-request-segments" },
     { name = "nl-core-news-sm" },
     { name = "presidio-analyzer", extra = ["transformers"] },
     { name = "presidio-anonymizer" },
@@ -632,6 +633,7 @@ requires-dist = [
     { name = "en-core-web-sm", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "neurwerk-request-segments", directory = "vendor/request_segments" },
     { name = "nl-core-news-sm", url = "https://github.com/explosion/spacy-models/releases/download/nl_core_news_sm-3.8.0/nl_core_news_sm-3.8.0-py3-none-any.whl" },
     { name = "presidio-analyzer", extras = ["transformers"], specifier = "==2.2.360" },
     { name = "presidio-anonymizer", specifier = "==2.2.360" },
@@ -654,6 +656,17 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
 provides-extras = ["cpu", "cu124", "dev"]
+
+[[package]]
+name = "neurwerk-request-segments"
+version = "0.1.0"
+source = { directory = "vendor/request_segments" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.12,<3" }]
 
 [[package]]
 name = "nl-core-news-sm"

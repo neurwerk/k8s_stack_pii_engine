@@ -10,7 +10,7 @@ import pytest
 import pii_engine.services.planner as planner_module
 from pii_engine.config.policy import PolicySettings
 from pii_engine.config.settings import Settings
-from pii_engine.models.contracts import McpRequest, OpenAIChatRequest
+from pii_engine.models.contracts import ChatMessage, McpParams, McpRequest, OpenAIChatRequest
 from pii_engine.services.analyzer import DeterministicAnalyzer, EntityMatch
 from pii_engine.services.anonymizer import TestAnonymizer
 from pii_engine.services.planner import ActionPlanner, LeafPlan
@@ -74,7 +74,7 @@ def _service(
 
 
 def _request(text: str = "email a@example.com") -> OpenAIChatRequest:
-    return OpenAIChatRequest(model="test", messages=[{"role": "user", "content": text}])
+    return OpenAIChatRequest(model="test", messages=[ChatMessage(role="user", content=text)])
 
 
 def _mcp_request(text: str = "email a@example.com") -> McpRequest:
@@ -82,7 +82,7 @@ def _mcp_request(text: str = "email a@example.com") -> McpRequest:
         jsonrpc="2.0",
         id=1,
         method="tools/call",
-        params={"name": "lookup", "arguments": {"query": text}},
+        params=McpParams(name="lookup", arguments={"query": text}),
     )
 
 
@@ -287,9 +287,9 @@ def test_unique_transformed_values_are_counted_across_leaves() -> None:
     request = OpenAIChatRequest(
         model="test",
         messages=[
-            {"role": "user", "content": "a@example.com"},
-            {"role": "user", "content": "a@example.com"},
-            {"role": "user", "content": "b@example.com"},
+            ChatMessage(role="user", content="a@example.com"),
+            ChatMessage(role="user", content="a@example.com"),
+            ChatMessage(role="user", content="b@example.com"),
         ],
     )
 
@@ -428,8 +428,8 @@ def test_global_block_prevents_all_transformations() -> None:
     request = OpenAIChatRequest(
         model="test",
         messages=[
-            {"role": "user", "content": "a@example.com"},
-            {"role": "user", "content": "password: hunter2"},
+            ChatMessage(role="user", content="a@example.com"),
+            ChatMessage(role="user", content="password: hunter2"),
         ],
     )
     result = _service(policy, RejectTransform()).analyze(request)

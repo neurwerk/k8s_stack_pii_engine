@@ -34,7 +34,7 @@ from benchmarks.contracts import (
 )
 from pii_engine.config.policy import test_policy
 from pii_engine.config.settings import Settings
-from pii_engine.models.contracts import OpenAIChatRequest, SupportedRequest
+from pii_engine.models.contracts import ChatMessage, OpenAIChatRequest, SupportedRequest
 from pii_engine.runtime import EngineRuntime, RuntimeNotReadyError
 from pii_engine.services.limiter import AnalysisCapacityError
 from pii_engine.services.policy import PolicyResult, PolicyService
@@ -86,7 +86,9 @@ def _settings(**overrides: object) -> Settings:
 def _request(characters: int) -> OpenAIChatRequest:
     """Build one safe request with an exact text size."""
     content = ("safe context " * (characters // 13 + 1))[:characters]
-    return OpenAIChatRequest(model="benchmark", messages=[{"role": "user", "content": content}])
+    return OpenAIChatRequest(
+        model="benchmark", messages=[ChatMessage(role="user", content=content)]
+    )
 
 
 def _percentile(values: list[float], quantile: float) -> float:
