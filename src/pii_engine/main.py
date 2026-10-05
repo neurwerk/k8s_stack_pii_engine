@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import ssl
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib.metadata import version as package_version
 from typing import Any, Literal
+from uuid import uuid4
 
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from neurwerk_request_segments import UnsupportedFeatureError
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.protocols.http.h11_impl import H11Protocol
@@ -30,7 +33,15 @@ from pii_engine.controllers.api import (
 )
 from pii_engine.controllers.health import router as health_router
 from pii_engine.lib.identity import peer_certificate_from_transport
-from pii_engine.models.contracts import AnalysisErrorCode
+from pii_engine.models.contracts import (
+    AnalysisErrorCode,
+    AnalysisLimitErrorDetail,
+    AnalysisLimitErrorResponse,
+    LimitDetail,
+    McpRequest,
+    OpenAIChatRequest,
+    OpenAIResponsesRequest,
+)
 from pii_engine.runtime import EngineRuntime, get_runtime, initialize_runtime, set_runtime
 from pii_engine.services.errors import AnalysisRequestTooLargeError, InvalidAnalysisRequestError
 
@@ -67,12 +78,32 @@ class RequestSizeLimitMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        supplied_id = Headers(scope=scope).get("x-correlation-id", "")
+        correlation_id = (
+            supplied_id if re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", supplied_id) else uuid4().hex
+        )
+        scope.setdefault("state", {})["correlation_id"] = correlation_id
+        original_send = send
+
+        async def correlated_send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                message = dict(message)
+                message["headers"] = [
+                    (key, value)
+                    for key, value in message.get("headers", [])
+                    if key.lower() != b"x-correlation-id"
+                ] + [(b"x-correlation-id", correlation_id.encode("ascii"))]
+            await original_send(message)
+
+        send = correlated_send
         if declared_error := self._declared_error(scope):
             await self._error(scope, receive, send, *declared_error)
             return
         buffered, stream_error = await self._buffer_body(receive)
         if stream_error is not None:
-            await self._error(scope, receive, send, "request_too_large", stream_error)
+            await self._error(
+                scope, receive, send, "request_too_large", "request limit exceeded", stream_error
+            )
             return
 
         async def limited_receive() -> Message:
@@ -82,7 +113,10 @@ class RequestSizeLimitMiddleware:
 
         await self.app(scope, limited_receive, send)
 
-    def _declared_error(self, scope: Scope) -> tuple[AnalysisErrorCode, str] | None:
+    def _declared_error(
+        self,
+        scope: Scope,
+    ) -> tuple[AnalysisErrorCode, str, LimitDetail | None] | None:
         """Validate Content-Length before consuming any request bytes."""
         content_length = Headers(scope=scope).get("content-length")
         if content_length is None:
@@ -90,12 +124,25 @@ class RequestSizeLimitMiddleware:
         try:
             declared = int(content_length)
         except ValueError:
-            return "invalid_request", "invalid content length"
-        if declared < 0 or declared > self.max_bytes:
-            return "request_too_large", "request body too large"
+            return "invalid_request", "invalid content length", None
+        if declared < 0:
+            return "request_too_large", "invalid content length", None
+        if declared > self.max_bytes:
+            return (
+                "request_too_large",
+                "request body too large",
+                LimitDetail(
+                    stage="admission",
+                    reason="declared_bytes",
+                    measured=declared,
+                    maximum=self.max_bytes,
+                    unit="bytes",
+                    exact=True,
+                ),
+            )
         return None
 
-    async def _buffer_body(self, receive: Receive) -> tuple[deque[Message], str | None]:
+    async def _buffer_body(self, receive: Receive) -> tuple[deque[Message], LimitDetail | None]:
         """Buffer at most the configured bytes while bounding empty chunk churn."""
         body = bytearray()
         consumed = 0
@@ -108,10 +155,24 @@ class RequestSizeLimitMiddleware:
             if not chunk and message.get("more_body", False):
                 empty_chunks += 1
                 if empty_chunks > 4_096:
-                    return deque(), "too many empty request body chunks"
+                    return deque(), LimitDetail(
+                        stage="admission",
+                        reason="empty_chunks",
+                        measured=empty_chunks,
+                        maximum=4_096,
+                        unit="items",
+                        exact=False,
+                    )
             consumed += len(chunk)
             if consumed > self.max_bytes:
-                return deque(), "request body too large"
+                return deque(), LimitDetail(
+                    stage="admission",
+                    reason="encoded_bytes",
+                    measured=consumed,
+                    maximum=self.max_bytes,
+                    unit="bytes",
+                    exact=not message.get("more_body", False),
+                )
             body.extend(chunk)
             if not message.get("more_body", False):
                 return deque(
@@ -120,10 +181,15 @@ class RequestSizeLimitMiddleware:
 
     @staticmethod
     async def _error(
-        scope: Scope, receive: Receive, send: Send, code: AnalysisErrorCode, detail: str
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        code: AnalysisErrorCode,
+        detail: str,
+        limit: LimitDetail | None = None,
     ) -> None:
         exc = (
-            AnalysisRequestTooLargeError(detail)
+            AnalysisRequestTooLargeError(detail, limit=limit)
             if code == "request_too_large"
             else InvalidAnalysisRequestError(detail)
         )
@@ -131,9 +197,21 @@ class RequestSizeLimitMiddleware:
         log_analysis_failure(
             _analysis_caller(scope.get("path", "")), code, exc, debug_details=False
         )
+        if limit is not None:
+            logger.warning(
+                "admission limit correlation_id=%s stage=%s reason=%s "
+                "measured=%d maximum=%d unit=%s exact=%s",
+                scope["state"]["correlation_id"],
+                limit.stage,
+                limit.reason,
+                limit.measured,
+                limit.maximum,
+                limit.unit,
+                limit.exact,
+            )
         response = JSONResponse(
             status_code=failure.status_code,
-            content=failure.response.model_dump(mode="json"),
+            content=_error_content(failure, limit),
         )
         await response(scope, receive, send)
 
@@ -183,10 +261,36 @@ def _install_analysis_error_handlers(app: FastAPI) -> None:
     """Install strict fail-closed handlers on the workload application only."""
 
     @app.exception_handler(AnalysisAPIError)
-    async def analysis_error_handler(_request: Request, exc: AnalysisAPIError) -> JSONResponse:
+    async def analysis_error_handler(request: Request, exc: AnalysisAPIError) -> JSONResponse:
+        cause = exc.__context__
+        supplied_limit = getattr(exc, "limit", None)
+        limit = (
+            supplied_limit
+            if isinstance(supplied_limit, LimitDetail)
+            else cause.limit
+            if isinstance(cause, AnalysisRequestTooLargeError)
+            else None
+        )
+        logger.warning(
+            "analysis rejection correlation_id=%s reason=%s",
+            request.state.correlation_id,
+            exc.response.error.code,
+        )
+        if limit is not None:
+            logger.warning(
+                "analysis limit correlation_id=%s stage=%s reason=%s "
+                "measured=%d maximum=%d unit=%s exact=%s",
+                request.state.correlation_id,
+                limit.stage,
+                limit.reason,
+                limit.measured,
+                limit.maximum,
+                limit.unit,
+                limit.exact,
+            )
         return JSONResponse(
             status_code=exc.status_code,
-            content=exc.response.model_dump(mode="json"),
+            content=_error_content(exc, limit),
         )
 
     @app.exception_handler(RequestValidationError)
@@ -198,12 +302,14 @@ def _install_analysis_error_handlers(app: FastAPI) -> None:
             request.url.path, exc.body, exc.errors()
         )
         logger.error(
-            "request validation failed family=%s reason=%s scope=%s count=%d caller=%s",
+            "request validation failed family=%s reason=%s scope=%s count=%d caller=%s "
+            "correlation_id=%s",
             family,
             reason,
             scope,
             count,
             _analysis_caller(request.url.path),
+            request.state.correlation_id,
         )
         failure = analysis_api_error(code)
         return JSONResponse(
@@ -214,12 +320,26 @@ def _install_analysis_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:
         code: AnalysisErrorCode = "internal_error"
-        log_analysis_failure(_analysis_caller(request.url.path), code, exc)
+        log_analysis_failure(_analysis_caller(request.url.path), code, exc, debug_details=False)
         failure = analysis_api_error(code)
         return JSONResponse(
             status_code=failure.status_code,
             content=failure.response.model_dump(mode="json"),
+            headers={"x-correlation-id": request.state.correlation_id},
         )
+
+
+def _error_content(failure: AnalysisAPIError, limit: LimitDetail | None) -> dict[str, Any]:
+    """Emit v2 only when the rejecting boundary supplied measured size facts."""
+    if limit is None or failure.response.error.code != "request_too_large":
+        return failure.response.model_dump(mode="json")
+    return AnalysisLimitErrorResponse(
+        error=AnalysisLimitErrorDetail(
+            message=failure.response.error.message,
+            retryable=failure.response.error.retryable,
+            limit=limit,
+        )
+    ).model_dump(mode="json")
 
 
 def _validation_diagnostics(
@@ -229,13 +349,13 @@ def _validation_diagnostics(
     family = _request_family(path, body)
     bounded_errors = [error for error in errors[:_MAX_VALIDATION_ERRORS] if isinstance(error, dict)]
     marker = {
-        "chat": "OpenAIChatRequest",
-        "responses": "OpenAIResponsesRequest",
-        "mcp": "McpRequest",
+        "chat": OpenAIChatRequest.__name__,
+        "responses": OpenAIResponsesRequest.__name__,
+        "mcp": McpRequest.__name__,
     }.get(family)
     selected = [error for error in bounded_errors if _validation_error_matches_model(error, marker)]
     relevant_errors = selected or bounded_errors
-    reasons = {_validation_reason(error.get("type")) for error in relevant_errors}
+    reasons = {_validation_reason(error) for error in relevant_errors}
     scopes = {_validation_scope(family, error.get("loc")) for error in relevant_errors}
     return (
         family,
@@ -262,7 +382,7 @@ def _validation_error_matches_model(error: dict[Any, Any], marker: str | None) -
 def _request_family(path: str, body: object) -> RequestFamily:
     """Classify only known request shapes without retaining or returning request values."""
     candidate = body
-    if path.startswith("/v1/studio/") and isinstance(body, dict):
+    if path.startswith(("/v1/studio/", "/v2/studio/")) and isinstance(body, dict):
         candidate = body.get("request")
     if not isinstance(candidate, dict):
         return "unknown"
@@ -275,8 +395,12 @@ def _request_family(path: str, body: object) -> RequestFamily:
     return "unknown"
 
 
-def _validation_reason(error_type: object) -> ValidationReason:
+def _validation_reason(error: dict[Any, Any]) -> ValidationReason:
     """Map Pydantic's error taxonomy to a fixed operational taxonomy."""
+    context = error.get("ctx")
+    if isinstance(context, dict) and isinstance(context.get("error"), UnsupportedFeatureError):
+        return "extra_forbidden"
+    error_type = error.get("type")
     if error_type == "extra_forbidden":
         return "extra_forbidden"
     if error_type == "missing":
@@ -314,9 +438,9 @@ def _validation_scope(family: RequestFamily, location: object) -> ValidationScop
 
 def _analysis_caller(path: str) -> str:
     """Derive only the bounded caller class from a workload route path."""
-    if path.startswith("/v1/adapter/"):
+    if path.startswith(("/v1/adapter/", "/v2/adapter/")):
         return "adapter"
-    if path.startswith("/v1/studio/"):
+    if path.startswith(("/v1/studio/", "/v2/studio/")):
         return "studio"
     return "unknown"
 

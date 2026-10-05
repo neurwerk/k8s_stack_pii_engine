@@ -12,6 +12,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 COPY --from=uv /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock README.md LICENSE THIRD_PARTY_NOTICES.md ./
+COPY vendor/request_segments/ vendor/request_segments/
 RUN case "${ACCELERATOR}:${TARGETARCH}" in \
       cpu:amd64|cpu:arm64|cu124:amd64) ;; \
       *) echo "unsupported accelerator/platform: ${ACCELERATOR}/${TARGETARCH}" >&2; exit 1 ;; \

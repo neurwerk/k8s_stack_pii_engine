@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal, cast
 
@@ -12,16 +13,21 @@ from pii_engine.lib.safety import SAFETY_BY_NAME, SafetyRule
 from pii_engine.metrics import actions_total, entities_total
 from pii_engine.models.contracts import (
     DocumentAnalyzeRequest,
-    McpRequest,
+    LimitDetail,
     PIIAction,
     PIIReportRow,
+    SegmentRequest,
     SupportedRequest,
-    has_attachments,
+    TextSegment,
 )
 from pii_engine.services.analyzer import Analyzer, EntityMatch
 from pii_engine.services.errors import AnalysisRequestTooLargeError, InvalidAnalysisRequestError
 from pii_engine.services.planner import ActionPlanner, LeafPlan, request_nonce
-from pii_engine.services.traversal import TextLeaf, iter_text_leaves, replace_text_leaves
+from pii_engine.services.traversal import (
+    TextLeaf,
+    legacy_segments,
+    restore_legacy_result,
+)
 
 _MAX_DIAGNOSTICS_PER_KIND = 2_048
 
@@ -30,7 +36,7 @@ _MAX_DIAGNOSTICS_PER_KIND = 2_048
 class LogicalDetectionData:
     """Retain safe logical detection evidence for the Studio response."""
 
-    path: tuple[str | int, ...]
+    segment_id: str
     start: int
     end: int
     entity_type: str
@@ -38,13 +44,14 @@ class LogicalDetectionData:
     source: Literal["deterministic", "spacy", "transformer", "policy_regex"]
     configured_action: PIIAction
     resolved_action: PIIAction
+    path: tuple[str | int, ...] = ()
 
 
 @dataclass(frozen=True)
 class EffectiveRegionData:
     """Retain safe effective overlap evidence for the Studio response."""
 
-    path: tuple[str | int, ...]
+    segment_id: str
     start: int
     end: int
     entity_type: str
@@ -53,15 +60,17 @@ class EffectiveRegionData:
     score: float
     member_entity_types: tuple[str, ...]
     overlap: bool
+    path: tuple[str | int, ...] = ()
 
 
 @dataclass
 class PolicyResult:
     """Hold a fully evaluated request without retaining cross-request plaintext."""
 
-    request: SupportedRequest | None
     decision: Literal["pass", "block", "apply_actions", "reroute"]
     remote_allowed: bool
+    segments: list[TextSegment] | None = None
+    request: SupportedRequest | None = None
     entities: list[str] = field(default_factory=list)
     entity_counts: dict[str, int] = field(default_factory=dict)
     applied_actions: list[str] = field(default_factory=list)
@@ -102,19 +111,40 @@ class PolicyService:
 
     def analyze(
         self,
-        request: SupportedRequest | DocumentAnalyzeRequest,
+        request: SegmentRequest | SupportedRequest | DocumentAnalyzeRequest,
         *,
         include_diagnostics: bool = False,
         placeholder_namespace: str | None = None,
     ) -> PolicyResult:
-        """Run bounds, traversal, safety, PII, actions, and classification in order."""
-        document = request if isinstance(request, DocumentAnalyzeRequest) else None
-        request = request.request if isinstance(request, DocumentAnalyzeRequest) else request
-        leaves = iter_text_leaves(request, self.settings.max_nesting_depth)
+        """Adapt legacy callers once, then run the provider-independent segment core."""
+        if isinstance(request, SegmentRequest):
+            return self.analyze_segments(
+                request,
+                include_diagnostics=include_diagnostics,
+                placeholder_namespace=placeholder_namespace,
+            )
+        segments, extracted = legacy_segments(request, self.settings.max_nesting_depth)
+        result = self.analyze_segments(
+            segments,
+            include_diagnostics=include_diagnostics,
+            placeholder_namespace=placeholder_namespace,
+        )
+        restore_legacy_result(result, extracted)
+        return result
+
+    def analyze_segments(
+        self,
+        request: SegmentRequest,
+        *,
+        include_diagnostics: bool = False,
+        placeholder_namespace: str | None = None,
+    ) -> PolicyResult:
+        """Run safety and global policy decisions over independent caller segments."""
+        leaves = [TextLeaf((segment.id,), segment.text) for segment in request.segments]
         result = self._preflight(request, leaves)
         face_route = None
-        if document is not None:
-            faces = document.visual_findings.faces
+        if request.visual_findings is not None:
+            faces = request.visual_findings.faces
             face_policy = self.policy.attachments.faces
             if faces.count and face_policy.action == "reroute":
                 face_route = face_policy.route_class or self.policy.routing.default_target
@@ -129,9 +159,9 @@ class PolicyService:
                     applied_actions=["block"],
                     text_leaf_count=len(leaves),
                 )
-            if result is None and not document.text_pii_enabled:
+            if result is None and not request.text_pii_enabled:
                 result = PolicyResult(
-                    request=request,
+                    segments=request.segments,
                     decision="pass",
                     remote_allowed=True,
                     text_leaf_count=len(leaves),
@@ -144,13 +174,13 @@ class PolicyService:
                 placeholder_namespace=placeholder_namespace,
                 face_route=face_route,
             )
-        if document is not None:
-            self._apply_visual_result(result, document, face_route)
+        if request.visual_findings is not None:
+            self._apply_visual_result(result, request, face_route)
         return result
 
     def _analyze_text(
         self,
-        request: SupportedRequest,
+        request: SegmentRequest,
         leaves: list[TextLeaf],
         *,
         include_diagnostics: bool,
@@ -160,7 +190,7 @@ class PolicyService:
         """Resolve text and face routing conflicts before transforming any text."""
         nonce = placeholder_namespace or request_nonce()
         prepared, entities, counts, route_classes, reroute_entities, overlap_count = (
-            self._prepare_plans(leaves, reroute_as_block=isinstance(request, McpRequest))
+            self._prepare_plans(leaves, reroute_as_block=request.request_kind == "mcp")
         )
         logical_detections, effective_regions, diagnostics_truncated = (
             self._diagnostics(prepared) if include_diagnostics else ([], [], False)
@@ -196,15 +226,15 @@ class PolicyService:
             decision = "apply_actions"
         else:
             decision = "pass"
-        if route_class is None and not isinstance(request, McpRequest):
+        if route_class is None and request.request_kind != "mcp":
             route_class = self._classify(transformed)
         response_notices = (
             []
-            if isinstance(request, McpRequest)
+            if request.request_kind == "mcp"
             else self._response_notices(decision, bool(entities), actions)
         )
         return PolicyResult(
-            request=transformed,
+            segments=transformed,
             decision=decision,
             remote_allowed=decision != "reroute",
             entities=sorted(entities),
@@ -230,9 +260,11 @@ class PolicyService:
         )
 
     def _apply_visual_result(
-        self, result: PolicyResult, document: DocumentAnalyzeRequest, face_route: str | None
+        self, result: PolicyResult, document: SegmentRequest, face_route: str | None
     ) -> None:
         """Add aggregate face evidence without inventing text spans or transformations."""
+        if document.visual_findings is None:
+            return
         count = document.visual_findings.faces.count
         if not count:
             return
@@ -273,8 +305,7 @@ class PolicyService:
         effective_regions: list[EffectiveRegionData] = []
         truncated = False
         for leaf, plan in prepared:
-            public_path, path_truncated = _bounded_public_path(leaf.path)
-            truncated = truncated or path_truncated
+            segment_id = str(leaf.path[0])
             for match in plan.matches:
                 region = next(
                     item
@@ -284,7 +315,7 @@ class PolicyService:
                 if len(logical_detections) < _MAX_DIAGNOSTICS_PER_KIND:
                     logical_detections.append(
                         LogicalDetectionData(
-                            path=public_path,
+                            segment_id=segment_id,
                             start=match.start,
                             end=match.end,
                             entity_type=match.entity_type,
@@ -307,7 +338,7 @@ class PolicyService:
                 if len(effective_regions) < _MAX_DIAGNOSTICS_PER_KIND:
                     effective_regions.append(
                         EffectiveRegionData(
-                            path=public_path,
+                            segment_id=segment_id,
                             start=match.start,
                             end=match.end,
                             entity_type=match.entity_type,
@@ -366,10 +397,10 @@ class PolicyService:
 
     def _transform_plans(
         self,
-        request: SupportedRequest,
+        request: SegmentRequest,
         prepared: list[tuple[TextLeaf, LeafPlan]],
         nonce: str,
-    ) -> tuple[SupportedRequest, set[str], dict[str, str]]:
+    ) -> tuple[list[TextSegment], set[str], dict[str, str]]:
         """Transform prepared plans only after global block resolution."""
         replacements: dict[tuple[str | int, ...], str] = {}
         actions: set[str] = set()
@@ -380,14 +411,17 @@ class PolicyService:
             _merge_reversal(reversal, plan.reversal)
             if plan.text != leaf.text:
                 replacements[leaf.path] = plan.text
-        transformed = replace_text_leaves(request, replacements) if replacements else request
+        transformed = [
+            TextSegment(id=segment.id, text=replacements.get((segment.id,), segment.text))
+            for segment in request.segments
+        ]
         return transformed, actions, reversal
 
-    def _preflight(self, request: SupportedRequest, leaves: list[TextLeaf]) -> PolicyResult | None:
+    def _preflight(self, request: SegmentRequest, leaves: list[TextLeaf]) -> PolicyResult | None:
         """Apply bounds, attachment policy, and original-text safety before PII work."""
-        if isinstance(request, McpRequest) and not leaves:
-            return PolicyResult(request=request, decision="pass", remote_allowed=True)
-        attachments = has_attachments(request)
+        if request.request_kind == "mcp" and not leaves and not request.attachments_present:
+            return PolicyResult(segments=[], decision="pass", remote_allowed=True)
+        attachments = request.attachments_present
         if leaves or not attachments:
             self._validate_bounds(leaves)
         if attachments:
@@ -397,7 +431,9 @@ class PolicyService:
                 decision="block",
                 remote_allowed=False,
                 applied_actions=["block"],
-                response_notices=["Attachments are blocked by the configured policy."],
+                response_notices=[]
+                if request.request_kind == "mcp"
+                else ["Attachments are blocked by the configured policy."],
                 text_leaf_count=len(leaves),
             )
         if safety := self._safety_match(leaves):
@@ -408,7 +444,7 @@ class PolicyService:
                 remote_allowed=False,
                 applied_actions=["block"],
                 safety_rule=safety.name,
-                response_notices=[] if isinstance(request, McpRequest) else [safety.message],
+                response_notices=[] if request.request_kind == "mcp" else [safety.message],
                 text_leaf_count=len(leaves),
             )
         return None
@@ -416,10 +452,35 @@ class PolicyService:
     def _validate_bounds(self, leaves: list[TextLeaf]) -> None:
         if not leaves:
             raise InvalidAnalysisRequestError("request contains no model-visible text")
+        self.validate_segment_limits(leaves)
+
+    def validate_segment_limits(self, leaves: Sequence[TextSegment | TextLeaf]) -> None:
+        """Enforce measured semantic bounds before cache access or analysis."""
         if len(leaves) > self.settings.max_text_leaves:
-            raise AnalysisRequestTooLargeError("request contains too many text leaves")
-        if sum(len(leaf.text) for leaf in leaves) > self.settings.max_text_characters:
-            raise AnalysisRequestTooLargeError("request contains too many text characters")
+            raise AnalysisRequestTooLargeError(
+                "request contains too many text segments",
+                limit=LimitDetail(
+                    stage="inspection",
+                    reason="segments",
+                    measured=len(leaves),
+                    maximum=self.settings.max_text_leaves,
+                    unit="items",
+                    exact=True,
+                ),
+            )
+        characters = sum(len(leaf.text) for leaf in leaves)
+        if characters > self.settings.max_text_characters:
+            raise AnalysisRequestTooLargeError(
+                "request contains too many text characters",
+                limit=LimitDetail(
+                    stage="inspection",
+                    reason="text_characters",
+                    measured=characters,
+                    maximum=self.settings.max_text_characters,
+                    unit="characters",
+                    exact=True,
+                ),
+            )
 
     def _compile_safety_rules(self) -> tuple[SafetyRule, ...]:
         rules: list[SafetyRule] = []
@@ -462,10 +523,8 @@ class PolicyService:
                 return entry.route_class or self.policy.routing.default_target
         return detected[0]
 
-    def _classify(self, request: SupportedRequest) -> str:
-        text = "\n".join(
-            leaf.text for leaf in iter_text_leaves(request, self.settings.max_nesting_depth)
-        )
+    def _classify(self, segments: list[TextSegment]) -> str:
+        text = "\n".join(segment.text for segment in segments)
         for item in self.policy.classifier.classes:
             if any(re.search(pattern, text) for pattern in item.patterns):
                 return item.name
@@ -539,12 +598,3 @@ def _normalized_source(
     if source in {"spacy", "transformer"}:
         return source
     return "deterministic"
-
-
-def _bounded_public_path(path: tuple[str | int, ...]) -> tuple[tuple[str | int, ...], bool]:
-    """Bound public path components without exposing the private storage marker."""
-    bounded = tuple(
-        min(part, 10_000_000) if isinstance(part, int) else part[:128] for part in path[:64]
-    )
-    truncated = len(path) > 64 or any(isinstance(part, str) and len(part) > 128 for part in path)
-    return bounded, truncated

@@ -4,27 +4,39 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
+from neurwerk_request_segments import models as provider
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
-from pydantic.json_schema import JsonDict, SkipJsonSchema
 
-type JsonScalar = str | int | float | bool | None
-type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
-type McpJsonValue = (
-    Annotated[str, Field(strict=True)]
-    | Annotated[int, Field(strict=True)]
-    | Annotated[float, Field(strict=True, allow_inf_nan=False)]
-    | Annotated[bool, Field(strict=True)]
-    | Annotated[list[McpJsonValue], Field(max_length=256)]
-    | Annotated[dict[str, McpJsonValue], Field(max_length=256)]
-    | None
-)
-type McpRequestId = (
-    Annotated[str, Field(strict=True, min_length=1, max_length=256)]
-    | Annotated[
-        int,
-        Field(strict=True, ge=-9_007_199_254_740_991, le=9_007_199_254_740_991),
-    ]
-)
+# Legacy names are aliases, never separately maintained provider definitions.
+AttachmentPart = provider.EngineAttachmentPart
+OpenAIChatRequest = provider.EngineChatRequest
+ChatStreamOptions = provider.EngineChatStreamOptions
+FunctionCall = provider.EngineFunction
+McpParams = provider.EngineMcpParams
+McpRequest = provider.EngineMcpRequest
+ChatMessage = provider.EngineMessage
+MessageContent = provider.EngineMessageContent
+ResponseFunctionCall = provider.EngineResponseFunctionCall
+ResponseFunctionOutput = provider.EngineResponseFunctionOutput
+ResponseInput = provider.EngineResponseInput
+ResponseInputItem = provider.EngineResponseInputItem
+ResponseMessage = provider.EngineResponseMessage
+OpenAIResponsesRequest = provider.EngineResponsesRequest
+ResponseTextConfig = provider.EngineResponseTextConfig
+ResponseTextFormat = provider.EngineResponseTextFormat
+ResponseFormatJsonObject = provider.EngineResponseTextFormatObject
+ResponseFormatJsonSchema = provider.EngineResponseTextFormatSchema
+ResponseFormatText = provider.EngineResponseTextFormatText
+ResponseTextPart = provider.EngineResponseTextPart
+TextPart = provider.EngineTextPart
+ToolCall = provider.EngineToolCall
+ToolDefinition = provider.EngineToolDefinition
+ToolFunction = provider.EngineToolFunction
+type JsonValue = provider.JsonValue
+type McpJsonValue = provider.McpJsonValue
+type McpRequestId = provider.McpRequestId
+type SupportedRequest = provider.SupportedRequest
+
 type AnalysisErrorCode = Literal[
     "invalid_request",
     "request_too_large",
@@ -43,15 +55,61 @@ type AnalysisErrorMessage = Literal[
 ]
 
 
-def _omit_none_default(schema: JsonDict) -> None:
-    """Keep omitted optional MCP objects from advertising null as their default."""
-    schema.pop("default", None)
-
-
 class StrictModel(BaseModel):
     """Reject undocumented fields at every policy boundary."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+
+class LimitDetail(BaseModel):
+    """Carry content-free measurements from the boundary that rejected work."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    component: Literal["pii_engine", "extproc", "request_segments"] = "pii_engine"
+    stage: Literal[
+        "admission",
+        "json",
+        "inspection",
+        "engine_request",
+        "engine_response",
+        "provider_response",
+        "output",
+    ]
+    reason: Literal[
+        "bytes",
+        "declared_bytes",
+        "encoded_bytes",
+        "decoded_bytes",
+        "transformed_bytes",
+        "depth",
+        "tokens",
+        "nodes",
+        "text_characters",
+        "segments",
+        "text_leaves",
+        "empty_chunks",
+    ]
+    measured: int = Field(ge=0)
+    maximum: int = Field(ge=0)
+    unit: Literal["bytes", "characters", "items", "levels"]
+    exact: bool
+
+    @model_validator(mode="after")
+    def validate_measurement(self) -> LimitDetail:
+        """Reject contradictory units or a measurement that did not exceed its limit."""
+        expected_unit = {
+            "bytes": "bytes",
+            "declared_bytes": "bytes",
+            "encoded_bytes": "bytes",
+            "decoded_bytes": "bytes",
+            "transformed_bytes": "bytes",
+            "depth": "levels",
+            "text_characters": "characters",
+        }.get(self.reason, "items")
+        if self.measured <= self.maximum or self.unit != expected_unit:
+            raise ValueError("invalid limit measurement")
+        return self
 
 
 class AnalysisErrorDetail(StrictModel):
@@ -69,254 +127,20 @@ class AnalysisErrorResponse(StrictModel):
     error: AnalysisErrorDetail
 
 
-class TextPart(StrictModel):
-    """Represent one OpenAI chat text part."""
+class AnalysisLimitErrorDetail(AnalysisErrorDetail):
+    """Extend a size rejection with an observed limit measurement."""
 
-    type: Literal["text"]
-    text: str = Field(min_length=1)
+    code: Literal["request_too_large"] = "request_too_large"
+    limit: LimitDetail
 
 
-class AttachmentPart(BaseModel):
-    """Accept known attachment blocks only so the block-only policy can reject them."""
+class AnalysisLimitErrorResponse(StrictModel):
+    """Version only the extended error envelope; success contracts are separate."""
 
-    model_config = ConfigDict(extra="allow", str_strip_whitespace=False)
+    api_version: Literal["v2"] = "v2"
+    error: AnalysisLimitErrorDetail
 
-    type: Literal[
-        "image_url",
-        "input_audio",
-        "file",
-        "input_image",
-        "input_file",
-        "image",
-        "audio",
-        "resource",
-        "resource_link",
-    ]
 
-
-type MessageContent = str | Annotated[list[TextPart | AttachmentPart], Field(max_length=64)]
-
-
-class FunctionCall(StrictModel):
-    """Represent a function call and its supported JSON arguments."""
-
-    name: str = Field(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9_.:-]+$")
-    arguments: JsonValue = ""
-
-
-class ToolCall(StrictModel):
-    """Represent an assistant function call."""
-
-    id: str = Field(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9_.:-]+$")
-    type: Literal["function"]
-    function: FunctionCall
-
-
-class ToolFunction(StrictModel):
-    """Describe one callable tool."""
-
-    name: str = Field(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9_.:-]+$")
-    # OpenCode tool descriptions can exceed 4,000 characters.
-    description: str | None = Field(default=None, max_length=20_000)
-    parameters: dict[str, JsonValue] | None = None
-
-
-class ToolDefinition(StrictModel):
-    """Describe one supported function tool."""
-
-    type: Literal["function"]
-    function: ToolFunction
-
-
-class ChatMessage(StrictModel):
-    """Represent system, user, assistant, or tool-result content."""
-
-    role: Literal["system", "developer", "user", "assistant", "tool"]
-    content: MessageContent | None = None
-    name: str | None = Field(default=None, max_length=256)
-    tool_calls: list[ToolCall] = Field(default_factory=list, max_length=32)
-    tool_call_id: str | None = Field(default=None, max_length=256)
-
-    @model_validator(mode="after")
-    def validate_role_fields(self) -> ChatMessage:
-        """Require the fields that distinguish assistant calls and tool results."""
-        if self.role == "tool" and not self.tool_call_id:
-            raise ValueError("tool messages require tool_call_id")
-        if self.tool_calls and self.role != "assistant":
-            raise ValueError("tool_calls are only supported on assistant messages")
-        if self.role == "assistant" and self.content is None and not self.tool_calls:
-            raise ValueError("assistant messages require content or tool_calls")
-        return self
-
-
-class ChatStreamOptions(StrictModel):
-    """Control metadata included in a streamed Chat Completions response."""
-
-    include_usage: Annotated[bool, Field(strict=True)]
-
-
-class OpenAIChatRequest(StrictModel):
-    """Bound an OpenAI Chat Completions request."""
-
-    model: str = Field(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9_./:-]+$")
-    messages: list[ChatMessage] = Field(min_length=1, max_length=256)
-    temperature: float | None = Field(default=None, ge=0, le=2)
-    top_p: float | None = Field(default=None, ge=0, le=1)
-    max_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
-    stream: bool = False
-    stream_options: ChatStreamOptions | None = None
-    n: int | None = Field(default=None, ge=1, le=16)
-    stop: str | list[str] | None = None
-    tools: list[ToolDefinition] = Field(default_factory=list, max_length=128)
-    tool_choice: Literal["none", "auto", "required"] | dict[str, JsonValue] | None = None
-    response_format: dict[str, JsonValue] | None = None
-    user: str | None = Field(default=None, max_length=256)
-
-    @model_validator(mode="after")
-    def validate_stream_options(self) -> OpenAIChatRequest:
-        """Allow stream options only for streamed Chat Completions requests."""
-        if self.stream_options is not None and not self.stream:
-            raise ValueError("stream_options require stream to be enabled")
-        return self
-
-
-class ResponseTextPart(StrictModel):
-    """Represent text accepted by the OpenAI Responses API."""
-
-    type: Literal["input_text", "output_text"]
-    text: str = Field(min_length=1)
-
-
-class ResponseMessage(StrictModel):
-    """Represent one Responses-style message item."""
-
-    type: Literal["message"] = "message"
-    role: Literal["system", "developer", "user", "assistant"]
-    content: list[ResponseTextPart | AttachmentPart] = Field(min_length=1, max_length=64)
-
-
-class ResponseFunctionCall(StrictModel):
-    """Represent a Responses-style function call."""
-
-    type: Literal["function_call"]
-    call_id: str = Field(min_length=1, max_length=256)
-    name: str = Field(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9_.:-]+$")
-    arguments: JsonValue
-
-
-class ResponseFunctionOutput(StrictModel):
-    """Represent nested textual tool output returned to a model."""
-
-    type: Literal["function_call_output"]
-    call_id: str = Field(min_length=1, max_length=256)
-    output: JsonValue
-
-
-type ResponseInputItem = ResponseMessage | ResponseFunctionCall | ResponseFunctionOutput
-type ResponseInput = str | Annotated[list[ResponseInputItem], Field(min_length=1, max_length=256)]
-
-
-class ResponseFormatText(StrictModel):
-    """Select ordinary text output from the Responses API."""
-
-    type: Literal["text"]
-
-
-class ResponseFormatJsonObject(StrictModel):
-    """Select the legacy JSON object output mode."""
-
-    type: Literal["json_object"]
-
-
-class ResponseFormatJsonSchema(StrictModel):
-    """Configure Responses API structured output with a JSON Schema."""
-
-    type: Literal["json_schema"]
-    name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
-    description: str | None = Field(default=None, max_length=4_000)
-    schema_: dict[str, JsonValue] = Field(alias="schema", max_length=256)
-    strict: bool | None = None
-
-
-type ResponseTextFormat = Annotated[
-    ResponseFormatText | ResponseFormatJsonObject | ResponseFormatJsonSchema,
-    Field(discriminator="type"),
-]
-
-
-class ResponseTextConfig(StrictModel):
-    """Control plain or structured text generated by the Responses API."""
-
-    format: ResponseTextFormat | None = None
-    verbosity: Literal["low", "medium", "high"] | None = None
-
-
-class OpenAIResponsesRequest(StrictModel):
-    """Bound the supported OpenAI Responses request shape."""
-
-    model: str = Field(min_length=1, max_length=256, pattern=r"^[A-Za-z0-9_./:-]+$")
-    input: ResponseInput
-    instructions: str | None = None
-    tools: list[ToolDefinition] = Field(default_factory=list, max_length=128)
-    tool_choice: Literal["none", "auto", "required"] | dict[str, JsonValue] | None = None
-    temperature: float | None = Field(default=None, ge=0, le=2)
-    top_p: float | None = Field(default=None, ge=0, le=1)
-    max_output_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
-    stream: bool = False
-    previous_response_id: str | None = Field(default=None, max_length=256)
-    text: ResponseTextConfig | None = None
-    user: str | None = Field(default=None, max_length=256)
-
-
-class McpParams(StrictModel):
-    """Represent bounded MCP tool-call input and immutable protocol metadata."""
-
-    name: str = Field(
-        min_length=1,
-        max_length=128,
-        pattern=r"^[A-Za-z0-9_.-]+$",
-    )
-    arguments: Annotated[dict[str, McpJsonValue], Field(max_length=256)] | SkipJsonSchema[None] = (
-        Field(
-            default=None,
-            exclude_if=lambda value: value is None,
-            json_schema_extra=_omit_none_default,
-        )
-    )
-    meta: (
-        Annotated[
-            dict[Annotated[str, Field(max_length=256)], McpJsonValue],
-            Field(max_length=64),
-        ]
-        | SkipJsonSchema[None]
-    ) = Field(
-        default=None,
-        alias="_meta",
-        exclude_if=lambda value: value is None,
-        json_schema_extra=_omit_none_default,
-    )
-
-    @model_validator(mode="before")
-    @classmethod
-    def validate_optional_objects(cls, value: object) -> object:
-        """Reject explicit null where MCP permits only an omitted or object field."""
-        if isinstance(value, dict) and any(
-            key in value and value[key] is None for key in ("arguments", "_meta")
-        ):
-            raise ValueError("optional MCP params must be objects when present")
-        return value
-
-
-class McpRequest(StrictModel):
-    """Bound one direct MCP tools/call request containing tool arguments."""
-
-    jsonrpc: Literal["2.0"]
-    id: McpRequestId
-    method: Literal["tools/call"]
-    params: McpParams
-
-
-type SupportedRequest = OpenAIChatRequest | OpenAIResponsesRequest | McpRequest
 SUPPORTED_REQUEST_ADAPTER = TypeAdapter(SupportedRequest)
 
 
@@ -372,6 +196,39 @@ class DocumentAnalyzeRequest(StrictModel):
         """Reject pixels and other raw attachments in a visual envelope."""
         if has_attachments(self.request):
             raise ValueError("document envelopes require a converted text-only request")
+        return self
+
+
+class TextSegment(StrictModel):
+    """Carry one independently analyzed string under a caller-owned opaque ID."""
+
+    id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    text: str
+
+
+class SegmentRequest(StrictModel):
+    """Accept only extracted text and trusted analysis controls, never provider JSON."""
+
+    api_version: Literal["v2"] = "v2"
+    request_kind: Literal["chat", "responses", "mcp"]
+    scope: Literal["session", "request"]
+    segments: list[TextSegment]
+    text_pii_enabled: Annotated[bool, Field(strict=True)] = True
+    attachments_present: Annotated[bool, Field(strict=True)] = False
+    visual_findings: VisualFindings | None = None
+
+    @model_validator(mode="after")
+    def validate_segments(self) -> SegmentRequest:
+        """Keep IDs unique and visual controls restricted to converted model requests."""
+        ids = [segment.id for segment in self.segments]
+        if len(ids) != len(set(ids)):
+            raise ValueError("segment IDs must be unique")
+        if self.visual_findings is not None and (
+            self.request_kind == "mcp" or self.scope != "request" or self.attachments_present
+        ):
+            raise ValueError("visual findings require converted request-scoped model segments")
+        if not self.text_pii_enabled and self.visual_findings is None:
+            raise ValueError("disabling text analysis requires visual findings")
         return self
 
 
@@ -649,6 +506,142 @@ class AdapterAnalyzeResponse(AnalysisResponseBase):
 
 class StudioAnalyzeResponse(AnalysisResponseBase):
     """Return policy results without any reversal material."""
+
+
+class SegmentAnalysisResponse(StrictModel):
+    """Return policy facts and transformed segments without provider protocol data."""
+
+    api_version: Literal["v2"] = "v2"
+    decision: Decision
+    entities: list[str] = Field(default_factory=list, max_length=64)
+    entity_counts: dict[str, int] = Field(default_factory=dict, max_length=64)
+    applied_actions: list[str] = Field(default_factory=list, max_length=16)
+    remote_allowed: bool
+    route_class: str | None = Field(default=None, max_length=128)
+    segments: list[TextSegment] | None
+    analysis: AnalysisMetadata
+    notices: Notices
+    safety_rule: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_forwarding(self) -> SegmentAnalysisResponse:
+        """Require a complete segment result exactly when forwarding is allowed."""
+        if (self.decision == "block") != (self.segments is None):
+            raise ValueError("blocked results must not contain segments")
+        if self.remote_allowed != (self.decision not in {"block", "reroute"}):
+            raise ValueError("decision and remote permission disagree")
+        if self.decision == "block" and self.route_class is not None:
+            raise ValueError("blocked results cannot select a route")
+        if self.decision == "reroute" and not self.route_class:
+            raise ValueError("reroute requires a route")
+        if self.segments is not None:
+            ids = [segment.id for segment in self.segments]
+            if len(ids) != len(set(ids)) or len(ids) > 256:
+                raise ValueError("invalid result segment IDs")
+        return self
+
+
+class AdapterSegmentAnalyzeResponse(SegmentAnalysisResponse):
+    """Carry bounded reports and request-local reversal only to the trusted adapter."""
+
+    report: PIIReport
+    visual_findings: VisualFindings | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    reversal: dict[
+        Annotated[
+            str,
+            Field(
+                min_length=3,
+                max_length=256,
+                pattern=r"^<(?:REV|ENCRYPTED)_[A-Z][A-Z0-9_]*_[0-9a-f]{16}_[0-9a-f]{16}>$",
+            ),
+        ],
+        Annotated[str, Field(min_length=1, max_length=4_000_000)],
+    ] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_report(self) -> AdapterSegmentAnalyzeResponse:
+        """Retain report, visual, and reversal provenance without provider models."""
+        self._validate_counts()
+        self._validate_actions()
+        self._validate_visual()
+        return self
+
+    def _validate_counts(self) -> None:
+        """Check aggregate counts against their current or cached provenance."""
+        if set(self.entity_counts) != set(self.entities) or any(
+            count <= 0 or count > 10_000_000 for count in self.entity_counts.values()
+        ):
+            raise ValueError("adapter entity counts are inconsistent")
+        counts = {row.entity_type: row.detected_count for row in self.report.rows}
+        if self.analysis.cached_decision_applied:
+            if self.decision not in {"block", "reroute"} or any(
+                entity not in self.entity_counts or count > self.entity_counts[entity]
+                for entity, count in counts.items()
+            ):
+                raise ValueError("cached reports require consistent terminal decisions")
+        elif counts != self.entity_counts:
+            raise ValueError("current report rows must match adapter entity counts")
+
+    def _validate_actions(self) -> None:
+        """Require the report and reversal state to agree with the effective decision."""
+        actions = {row.action for row in self.report.rows}
+        if self.decision == "pass" and actions - {"pass"}:
+            raise ValueError("pass decisions require pass report rows")
+        if self.decision == "apply_actions" and (
+            actions & {"block", "reroute"}
+            or not any(
+                row.transformed_count or row.action == "text-only" for row in self.report.rows
+            )
+        ):
+            raise ValueError("action decisions require transformed non-terminal report rows")
+        if self.decision == "reroute" and (
+            "block" in actions
+            or (
+                "reroute" not in actions
+                and not (
+                    self.analysis.source == "current_request"
+                    and self.analysis.scan_performed
+                    and self.analysis.cached_decision_applied
+                )
+            )
+        ):
+            raise ValueError("reroute decisions require reroute evidence")
+        if self.decision == "block" and (
+            self.reversal
+            or any(row.transformed_count for row in self.report.rows)
+            or (self.report.rows and "block" not in actions)
+        ):
+            raise ValueError("blocked results cannot contain transformations")
+        if not self.analysis.scan_performed and self.reversal:
+            raise ValueError("reversal requires a current text scan")
+
+    def _validate_visual(self) -> None:
+        """Validate current visual evidence without inferring text detections."""
+        if self.visual_findings is None:
+            if "FACE" in self.entity_counts:
+                raise ValueError("FACE requires current visual findings")
+        else:
+            faces = self.visual_findings.faces
+            if self.analysis.source != "current_request" or self.analysis.cached_decision_applied:
+                raise ValueError("visual findings cannot use cached decisions")
+            if self.entity_counts.get("FACE", 0) != (faces.count or 0):
+                raise ValueError("FACE counts must match visual findings")
+            if faces.scan_status == "failed" and self.decision != "block":
+                raise ValueError("failed face inspection requires a block")
+            if not self.analysis.scan_performed and set(self.entity_counts) - {"FACE"}:
+                raise ValueError("unscanned visual results cannot claim text detections")
+            face_row = next((row for row in self.report.rows if row.entity_type == "FACE"), None)
+            if face_row is not None and (
+                face_row.action not in self.applied_actions
+                or (self.decision == "block" and face_row.action != "block")
+            ):
+                raise ValueError("FACE must report its effective action")
+        if "text-only" in self.applied_actions and not any(
+            row.entity_type == "FACE" for row in self.report.rows
+        ):
+            raise ValueError("text-only requires a FACE row")
 
 
 class ActionParam(StrictModel):

@@ -1,7 +1,7 @@
 # Neurwerk PII Engine
 
 Bounded, deterministic PII and safety policy evaluation for supported LLM and
-MCP requests. The service analyzes structured requests with Microsoft Presidio,
+MCP requests. The service analyzes extracted text segments with Microsoft Presidio,
 applies policy-selected transformations or terminal decisions, and returns a
 strict typed result to its trusted adapters.
 
@@ -24,7 +24,52 @@ This repository owns the engine service and model-sync CLI. Gateway adaptation,
 human authorization, Kubernetes charts, and deployment values are separate
 components.
 
-## Document Request API
+## Segment API
+
+`POST /v2/adapter/analyze-segments` accepts extracted text rather than provider JSON:
+
+```json
+{
+  "api_version": "v2",
+  "request_kind": "chat",
+  "scope": "session",
+  "segments": [{"id": "s0", "text": "Text to inspect"}],
+  "text_pii_enabled": true,
+  "attachments_present": false
+}
+```
+
+`request_kind` is `chat`, `responses`, or `mcp`. Segment IDs are unique and opaque;
+spans never cross segments. Successful results return the same IDs in the same
+order under `segments`; blocked results return `segments: null`. Policy decisions,
+reports, notices, and adapter-only reversal mappings retain their existing meaning.
+Callers retain provider controls and reconstruct only the original text locations.
+
+Session-scoped adapter requests use the trusted `x-pii-session-key`. Stable aliases
+are limited to session-scoped Chat requests. Converted documents and images use
+`scope: request`, fresh aliases, and no session reads or writes. Optional
+`visual_findings` retains the documented face contract and requires request-scoped
+model analysis. Disabling text scanning requires these trusted visual controls.
+Unconverted attachments (`attachments_present: true`) block even on cached reroutes.
+
+Studio uses `POST /v2/studio/analyze-segments` with `{request, policy?}` and
+`POST /v2/studio/evaluate-policy` with `{request, policy?, simulation?}`. The only
+simulation mode is `deterministic_echo`. Studio requires request scope and cannot
+submit visual findings or disable text scanning. Evaluation diagnostics identify
+`segment_id` and original segment-local offsets; no reversal mapping is exposed.
+
+`GET /v2/adapter/ready` requires the adapter mTLS identity and returns
+`{"api_version":"v2","status":"ok"}` only when the analysis runtime is ready.
+Measured limit failures use the v2 error envelope with content-free measurements;
+generic errors retain the v1 error envelope. Limits are unchanged, and all logging
+remains content-free even at DEBUG.
+
+The v1 routes are compatibility wrappers over the same segment core. Their provider
+schemas and text extraction come from `neurwerk-request-segments`, maintained in
+the extProc repository. `vendor/request_segments/` is an unpublished source snapshot
+so ordinary uv and Docker builds need no sibling checkout or package publication.
+
+## Legacy Document Request API
 
 `POST /v1/adapter/analyze-document-request` requires the adapter mTLS identity.
 Its legacy body is an existing `OpenAIChatRequest` or `OpenAIResponsesRequest`: the whole

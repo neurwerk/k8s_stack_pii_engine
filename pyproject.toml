@@ -10,6 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "neurwerk-request-segments==0.1.0",
     "boto3>=1.35",
     "de-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/de_core_news_sm-3.8.0/de_core_news_sm-3.8.0-py3-none-any.whl",
     "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
@@ -70,6 +71,7 @@ conflicts = [
 ]
 
 [tool.uv.sources]
+neurwerk-request-segments = { path = "vendor/request_segments" }
 torch = [
     { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cu124", extra = "cu124", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },

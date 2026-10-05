@@ -18,6 +18,8 @@ from pii_engine.main import RequestSizeLimitMiddleware
 from pii_engine.models.contracts import (
     AdapterAnalyzeResponse,
     AnalysisMetadata,
+    ChatMessage,
+    McpParams,
     McpRequest,
     OpenAIChatRequest,
     OpenAIResponsesRequest,
@@ -26,7 +28,7 @@ from pii_engine.models.contracts import (
     TextPart,
 )
 from pii_engine.runtime import EngineRuntime, get_runtime
-from pii_engine.services.errors import AnalysisRequestTooLargeError, InvalidAnalysisRequestError
+from pii_engine.services.errors import AnalysisRequestTooLargeError
 from pii_engine.services.policy import PolicyResult
 from pii_engine.services.traversal import (
     TextLeaf,
@@ -190,7 +192,9 @@ async def test_visual_envelope_cannot_bypass_request_limits(
     "factory",
     [
         lambda text: TextPart(type="text", text=text),
-        lambda text: OpenAIChatRequest(model="test", messages=[{"role": "user", "content": text}]),
+        lambda text: OpenAIChatRequest(
+            model="test", messages=[ChatMessage(role="user", content=text)]
+        ),
         lambda text: ResponseTextPart(type="input_text", text=text),
         lambda text: OpenAIResponsesRequest(model="test", input=text),
         lambda text: OpenAIResponsesRequest(model="test", input="x", instructions=text),
@@ -198,7 +202,7 @@ async def test_visual_envelope_cannot_bypass_request_limits(
             jsonrpc="2.0",
             id=1,
             method="tools/call",
-            params={"name": "lookup", "arguments": {"query": text}},
+            params=McpParams(name="lookup", arguments={"query": text}),
         ),
     ],
 )
@@ -278,7 +282,7 @@ def _mcp_with_meta(meta: dict[str, object]) -> McpRequest:
 def test_mcp_metadata_accepts_exact_depth_and_rejects_one_deeper() -> None:
     validate_request_structure(_mcp_with_meta(_nested_mcp_meta(32)), max_depth=32)
 
-    with pytest.raises(InvalidAnalysisRequestError, match="nesting"):
+    with pytest.raises(AnalysisRequestTooLargeError, match="nesting"):
         validate_request_structure(_mcp_with_meta(_nested_mcp_meta(33)), max_depth=32)
 
 
@@ -306,7 +310,7 @@ def test_mcp_metadata_accepts_exact_node_budget_and_rejects_one_more() -> None:
 def test_mcp_metadata_depth_error_precedes_node_error_independent_of_key_order(
     meta: dict[str, object],
 ) -> None:
-    with pytest.raises(InvalidAnalysisRequestError, match="nesting"):
+    with pytest.raises(AnalysisRequestTooLargeError, match="nesting"):
         validate_request_structure(_mcp_with_meta(meta), max_depth=32)
 
 
@@ -321,7 +325,7 @@ def test_mcp_metadata_depth_error_precedes_node_error_independent_of_key_order(
 @pytest.mark.parametrize(
     ("meta", "status_code", "error_code"),
     [
-        (_nested_mcp_meta(33), 400, "invalid_request"),
+        (_nested_mcp_meta(33), 413, "request_too_large"),
         (_mcp_meta_with_nodes(4_097), 413, "request_too_large"),
     ],
     ids=["depth", "nodes"],
@@ -374,7 +378,7 @@ async def test_mcp_metadata_exact_boundaries_are_accepted_and_immutable(
 
 
 def test_transformed_placeholder_expansion_beyond_100k_revalidates() -> None:
-    request = OpenAIChatRequest(model="test", messages=[{"role": "user", "content": "x"}])
+    request = OpenAIChatRequest(model="test", messages=[ChatMessage(role="user", content="x")])
     replacement = PLACEHOLDER * 2_000
     assert len(replacement) > 100_000
     transformed = replace_text_leaves(request, {("messages", 0, "content"): replacement})
@@ -454,7 +458,7 @@ def test_adapter_reversal_accepts_plaintext_at_semantic_maximum() -> None:
 def _response_result(plaintext: str) -> PolicyResult:
     return PolicyResult(
         request=OpenAIChatRequest(
-            model="test", messages=[{"role": "user", "content": PLACEHOLDER}]
+            model="test", messages=[ChatMessage(role="user", content=PLACEHOLDER)]
         ),
         decision="apply_actions",
         remote_allowed=True,

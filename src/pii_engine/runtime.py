@@ -32,8 +32,7 @@ from pii_engine.metrics import (
 from pii_engine.models.contracts import (
     DocumentAnalyzeRequest,
     JsonValue,
-    McpRequest,
-    OpenAIChatRequest,
+    SegmentRequest,
     SupportedRequest,
 )
 from pii_engine.models.studio import EvaluationIssueStage, PolicyEvaluationIssue
@@ -49,7 +48,7 @@ from pii_engine.services.limiter import AnalysisCapacityError, AnalysisLimiter
 from pii_engine.services.planner import ActionPlanner
 from pii_engine.services.policy import PolicyResult, PolicyService
 from pii_engine.services.session import RequestKind, SessionDecision, SessionStore
-from pii_engine.services.traversal import validate_request_structure
+from pii_engine.services.traversal import legacy_segments, restore_legacy_result
 
 logger = logging.getLogger(__name__)
 _MAX_EVALUATION_ISSUES = 128
@@ -200,19 +199,39 @@ class EngineRuntime:
     async def analyze(
         self,
         caller: str,
-        request: SupportedRequest | DocumentAnalyzeRequest,
+        request: SegmentRequest | SupportedRequest | DocumentAnalyzeRequest,
         session_key: str | None = None,
         policy_override: PolicyOverride | None = None,
         *,
         request_scoped: bool = False,
     ) -> PolicyResult:
-        """Use the shared bounded queue, optionally without session state or stable aliases."""
+        """Adapt legacy transport then use one bounded segment runtime."""
+        if isinstance(request, SegmentRequest):
+            return await self.analyze_segments(caller, request, session_key, policy_override)
         if isinstance(request, DocumentAnalyzeRequest) and (
             caller != "adapter" or not request_scoped
         ):
             raise ValueError("visual findings require request-scoped document adapter analysis")
-        model_request = request.request if isinstance(request, DocumentAnalyzeRequest) else request
-        validate_request_structure(model_request, self.settings.max_nesting_depth)
+        segments, extracted = legacy_segments(
+            request,
+            self.settings.max_nesting_depth,
+            request_scoped=request_scoped or caller == "studio",
+        )
+        result = await self.analyze_segments(caller, segments, session_key, policy_override)
+        restore_legacy_result(result, extracted)
+        return result
+
+    async def analyze_segments(
+        self,
+        caller: str,
+        request: SegmentRequest,
+        session_key: str | None = None,
+        policy_override: PolicyOverride | None = None,
+    ) -> PolicyResult:
+        """Preserve sessions, admission, and deadlines independently of provider schemas."""
+        request_scoped = request.scope == "request"
+        _validate_segment_caller(caller, request)
+        self.policy.validate_segment_limits(request.segments)
         if not await self.ready():
             raise RuntimeNotReadyError("policy runtime is not ready")
         if policy_override is not None and caller != "studio":
@@ -223,7 +242,7 @@ class EngineRuntime:
             else self.policy_settings
         )
         policy = self._policy_service(active_policy) if policy_override is not None else self.policy
-        request_kind = _request_kind(model_request)
+        request_kind = _request_kind(request)
         validated_session_key = None if request_scoped else _validated_session_key(session_key)
         placeholder_namespace = (
             _conversation_placeholder_namespace(
@@ -232,7 +251,8 @@ class EngineRuntime:
                 self.settings.policy_version,
             )
             if caller == "adapter"
-            and isinstance(request, OpenAIChatRequest)
+            and request.request_kind == "chat"
+            and not request_scoped
             and validated_session_key is not None
             else None
         )
@@ -241,7 +261,7 @@ class EngineRuntime:
             if request_scoped
             else await self._cached_decision(caller, session_key, request_kind)
         )
-        cached_result = self._final_cached_result(model_request, cached, active_policy)
+        cached_result = self._final_cached_result(request, cached, active_policy)
         if cached_result is not None:
             self._validate_result_kind(cached_result, request_kind)
             self._record_result(caller, cached_result)
@@ -301,11 +321,32 @@ class EngineRuntime:
     async def evaluate_policy(
         self,
         caller: str,
-        request: SupportedRequest,
+        request: SegmentRequest | SupportedRequest,
         raw_policy: dict[str, JsonValue] | None,
     ) -> PolicyEvaluationResult:
         """Evaluate one raw Studio candidate without sessions or live mutation."""
-        validate_request_structure(request, self.settings.max_nesting_depth)
+        if not isinstance(request, SegmentRequest):
+            segments, extracted = legacy_segments(
+                request,
+                self.settings.max_nesting_depth,
+                request_scoped=True,
+            )
+            evaluation = await self.evaluate_policy(caller, segments, raw_policy)
+            if evaluation.result is not None:
+                restore_legacy_result(evaluation.result, extracted)
+            return evaluation
+        return await self.evaluate_segments_policy(caller, request, raw_policy)
+
+    async def evaluate_segments_policy(
+        self,
+        caller: str,
+        request: SegmentRequest,
+        raw_policy: dict[str, JsonValue] | None,
+    ) -> PolicyEvaluationResult:
+        """Evaluate one candidate under Studio admission limits without provider data."""
+        if request.scope != "request" or request.visual_findings is not None:
+            raise InvalidAnalysisRequestError("Studio evaluation requires request-scoped text")
+        self.policy.validate_segment_limits(request.segments)
         if caller != "studio":
             raise ValueError("policy evaluation is accepted only from Studio")
         if not await self.ready():
@@ -351,7 +392,7 @@ class EngineRuntime:
 
     async def _run_policy_evaluation(
         self,
-        request: SupportedRequest,
+        request: SegmentRequest,
         raw_policy: dict[str, JsonValue] | None,
         started: asyncio.Event,
     ) -> PolicyEvaluationResult:
@@ -383,7 +424,7 @@ class EngineRuntime:
                 self._studio_limiter.release()
 
     def _evaluate_policy_sync(
-        self, request: SupportedRequest, raw_policy: dict[str, JsonValue] | None
+        self, request: SegmentRequest, raw_policy: dict[str, JsonValue] | None
     ) -> PolicyEvaluationResult:
         """Validate and compile candidate policy before using the live analyzer and planner."""
         policy = self.policy
@@ -413,7 +454,7 @@ class EngineRuntime:
         self,
         caller: str,
         policy: PolicyService,
-        request: SupportedRequest | DocumentAnalyzeRequest,
+        request: SegmentRequest,
         started: asyncio.Event,
         *,
         placeholder_namespace: str | None = None,
@@ -527,10 +568,10 @@ class EngineRuntime:
         return cached
 
     @staticmethod
-    def _result_from_cache(request: SupportedRequest, cached: SessionDecision) -> PolicyResult:
+    def _result_from_cache(request: SegmentRequest, cached: SessionDecision) -> PolicyResult:
         """Return a safe cached block or unmasked trusted-local reroute."""
         return PolicyResult(
-            request=None if cached.decision == "block" else request,
+            segments=None if cached.decision == "block" else request.segments,
             decision=cached.decision,
             remote_allowed=cached.remote_allowed,
             entities=cached.entities,
@@ -548,14 +589,18 @@ class EngineRuntime:
     @classmethod
     def _final_cached_result(
         cls,
-        request: SupportedRequest,
+        request: SegmentRequest,
         cached: SessionDecision | None,
         policy: PolicySettings,
     ) -> PolicyResult | None:
         """Return cache results that need no current-request transformation."""
         if cached is None:
             return None
-        if cached.decision == "block" or not policy.pii.mask_on_reroute:
+        if cached.decision == "block":
+            return cls._result_from_cache(request, cached)
+        if request.attachments_present:
+            return None
+        if not policy.pii.mask_on_reroute:
             return cls._result_from_cache(request, cached)
         return None
 
@@ -681,6 +726,13 @@ class EngineRuntime:
         )
 
 
+def _validate_segment_caller(caller: str, request: SegmentRequest) -> None:
+    if caller == "studio" and request.scope != "request":
+        raise InvalidAnalysisRequestError("Studio analysis must be request-scoped")
+    if request.visual_findings is not None and caller != "adapter":
+        raise InvalidAnalysisRequestError("visual findings require document adapter analysis")
+
+
 def _validated_session_key(value: str | None) -> str | None:
     if value is None:
         return None
@@ -697,8 +749,8 @@ def _conversation_placeholder_namespace(
     return hmac.new(hash_key, message, hashlib.sha256).hexdigest()[:16]
 
 
-def _request_kind(request: SupportedRequest) -> RequestKind:
-    return "mcp" if isinstance(request, McpRequest) else "model"
+def _request_kind(request: SegmentRequest) -> RequestKind:
+    return "mcp" if request.request_kind == "mcp" else "model"
 
 
 def _invalid_evaluation(
