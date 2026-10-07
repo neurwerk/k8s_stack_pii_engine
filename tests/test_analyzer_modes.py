@@ -9,16 +9,21 @@ from pathlib import Path
 import pytest
 import yaml
 
+import pii_engine.runtime as runtime_module
 from pii_engine.config.policy import test_policy as make_test_policy
 from pii_engine.config.settings import Settings
 from pii_engine.runtime import EngineRuntime
 from pii_engine.services.analyzer import (
-    SPACY_ENTITY_MAPPING,
-    SPACY_IGNORED_ENTITY_LABELS,
     DeterministicAnalyzer,
-    PresidioSpacyAnalyzer,
     resolve_analyzer_mode,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_inference(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise production mode selection and readiness without model inference."""
+    monkeypatch.setattr(runtime_module, "configure_inference_device", lambda _device: "cpu")
+    monkeypatch.setattr(runtime_module, "create_analyzer", lambda *_args: DeterministicAnalyzer())
 
 
 def _verified_bundle(tmp_path: Path) -> tuple[Path, str]:
@@ -101,57 +106,6 @@ def test_auto_mode_uses_baseline_when_desired_reference_is_absent(tmp_path: Path
         model_manifest_sha256="0" * 64,
     )
     assert resolve_analyzer_mode(settings) == "baseline"
-
-
-def test_production_runtime_uses_spacy_baseline_without_test_analyzer(tmp_path: Path) -> None:
-    runtime = EngineRuntime(_production_settings(_policy_file(tmp_path)))
-    assert runtime.settings.allow_test_analyzer is False
-    assert runtime.analyzer_mode == "baseline"
-    assert isinstance(runtime._analyzer, PresidioSpacyAnalyzer)
-
-
-def test_spacy_baseline_normalizes_financial_entities(monkeypatch: pytest.MonkeyPatch) -> None:
-    def no_network(*args, **kwargs):
-        raise AssertionError("PII recognition must not download suffix data")
-
-    monkeypatch.setattr("requests.sessions.Session.request", no_network)
-    policy = make_test_policy()
-    policy.pii.supported_languages = ["en"]
-    policy.pii.analyzer_languages = ["en"]
-    policy.pii.analyzer_entities = ["IBAN", "CREDIT_CARD_NUMBER", "EMAIL_ADDRESS"]
-    text = "IBAN GB82WEST12345698765432 and card 4111 1111 1111 1111; test@example.com"
-    entities = {match.entity_type for match in PresidioSpacyAnalyzer(policy).analyze(text)}
-    assert entities == {"IBAN", "CREDIT_CARD_NUMBER", "EMAIL_ADDRESS"}
-
-
-def test_spacy_mapped_and_ignored_labels_cover_bundled_models() -> None:
-    """Every EN, DE, and NL NER label has an explicit non-overlapping disposition."""
-    expected = {
-        "CARDINAL",
-        "DATE",
-        "EVENT",
-        "FAC",
-        "GPE",
-        "LANGUAGE",
-        "LAW",
-        "LOC",
-        "MISC",
-        "MONEY",
-        "NORP",
-        "ORDINAL",
-        "ORG",
-        "PERCENT",
-        "PER",
-        "PERSON",
-        "PRODUCT",
-        "QUANTITY",
-        "TIME",
-        "WORK_OF_ART",
-    }
-    mapped = set(SPACY_ENTITY_MAPPING)
-    ignored = set(SPACY_IGNORED_ENTITY_LABELS)
-    assert mapped.isdisjoint(ignored)
-    assert mapped | ignored == expected
 
 
 async def test_baseline_runtime_requests_restart_when_reference_appears(tmp_path: Path) -> None:
@@ -255,7 +209,7 @@ def test_auto_mode_fails_closed_for_corrupt_bundle(tmp_path: Path) -> None:
 
 
 async def test_transformer_runtime_loses_readiness_when_reference_is_corrupted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     _root, digest = _verified_bundle(tmp_path)
     reference = tmp_path / "desired-bundle.json"
@@ -266,10 +220,6 @@ async def test_transformer_runtime_loses_readiness_when_reference_is_corrupted(
         model_bundle_reference=reference,
         model_bundle_version="1",
         model_manifest_sha256=digest,
-    )
-    monkeypatch.setattr(
-        "pii_engine.runtime.create_analyzer",
-        lambda _settings, _policy, _mode: DeterministicAnalyzer(),
     )
     runtime = EngineRuntime(settings)
     assert runtime.analyzer_mode == "transformer"

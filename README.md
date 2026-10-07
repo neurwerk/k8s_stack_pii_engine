@@ -168,8 +168,8 @@ redistribution terms of any separately supplied model bundle. See
 
 ## Local Validation
 
-Python 3.12 and [uv](https://docs.astral.sh/uv/) are required. The complete
-offline quality gate installs the CPU and development extras:
+Python 3.12 and [uv](https://docs.astral.sh/uv/) are required. The quality gate
+installs only the base dependencies and development extra:
 
 ```bash
 make check
@@ -179,6 +179,13 @@ This runs the frozen-lock check, Ruff lint/format checks, `ty` type checking,
 and pytest with an informational coverage report. `make benchmark` runs the
 synthetic benchmark separately. `make build` creates a local CPU image and is
 not part of validation.
+
+Validation uses the isolated test analyzer and does not install PyTorch,
+Transformers, spaCy, or language-model wheels. Tests cover API and policy
+behavior, security boundaries, limits, and model-file verification, not model
+inference or recognition quality. Running the production service requires
+`uv sync --frozen --extra cpu` or the supported `cu124` extra; release images
+still include the complete inference stack and three baseline language models.
 
 The Dockerfile keeps version tags for readability and pins their OCI image
 indexes by digest. When updating the Dockerfile frontend, uv, or Python image,

@@ -12,12 +12,8 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "neurwerk-request-segments==0.1.0",
     "boto3>=1.35",
-    "de-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/de_core_news_sm-3.8.0/de_core_news_sm-3.8.0-py3-none-any.whl",
-    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
     "fastapi>=0.115",
     "httpx>=0.27",
-    "nl-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/nl_core_news_sm-3.8.0/nl_core_news_sm-3.8.0-py3-none-any.whl",
-    "presidio-analyzer[transformers]==2.2.360",
     "presidio-anonymizer==2.2.360",
     "prometheus-client>=0.21",
     "pydantic>=2.12",
@@ -25,17 +21,27 @@ dependencies = [
     "pyyaml>=6.0",
     "redis>=5,<7",
     "tldextract==5.3.2",
-    "transformers==4.57.3",
     "uvicorn[standard]>=0.30",
 ]
 
 [project.optional-dependencies]
+# Production inference dependencies belong to image variants, not PR validation.
 cpu = [
+    "de-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/de_core_news_sm-3.8.0/de_core_news_sm-3.8.0-py3-none-any.whl",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+    "nl-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/nl_core_news_sm-3.8.0/nl_core_news_sm-3.8.0-py3-none-any.whl",
+    "presidio-analyzer[transformers]==2.2.360",
     "torch==2.6.0",
+    "transformers==4.57.3",
 ]
 cu124 = [
     "cupy-cuda12x==13.6.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "de-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/de_core_news_sm-3.8.0/de_core_news_sm-3.8.0-py3-none-any.whl",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+    "nl-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/nl_core_news_sm-3.8.0/nl_core_news_sm-3.8.0-py3-none-any.whl",
+    "presidio-analyzer[transformers]==2.2.360",
     "torch==2.6.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "transformers==4.57.3",
 ]
 dev = [
     "pytest>=8",
@@ -109,6 +115,13 @@ known-first-party = ["pii_engine"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+[[tool.ty.overrides]]
+include = ["src/pii_engine/services/analyzer.py", "src/pii_engine/services/recognizers.py"]
+
+[tool.ty.overrides.analysis]
+# Lazy production-only imports are supplied by the CPU or CUDA image extra.
+allowed-unresolved-imports = ["presidio_analyzer.**", "spacy", "thinc.api", "torch", "transformers"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

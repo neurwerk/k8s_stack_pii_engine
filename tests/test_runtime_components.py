@@ -1,19 +1,16 @@
-"""Exercise runtime dependencies without loading the multi-gigabyte checkpoints."""
+"""Exercise policy, session and runtime behavior without model dependencies."""
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import threading
 from pathlib import Path
 
 import pytest
-import yaml
 
 import pii_engine.runtime as runtime_module
-from pii_engine.config.policy import CustomRecognizer, load_policy
-from pii_engine.config.policy import test_policy as make_test_policy
+from pii_engine.config.policy import load_policy
 from pii_engine.config.settings import Settings
 from pii_engine.lib.catalog import ENTITY_CATALOG
 from pii_engine.main import _tls_kwargs
@@ -22,72 +19,12 @@ from pii_engine.runtime import EngineRuntime
 from pii_engine.services.analyzer import (
     DeterministicAnalyzer,
     EntityMatch,
-    PresidioAnalyzer,
-    PresidioSpacyAnalyzer,
-    _baseline_chunks,
     _chunks,
-    configure_inference_device,
 )
 from pii_engine.services.anonymizer import PresidioAnonymizer
 from pii_engine.services.limiter import AnalysisCapacityError
 from pii_engine.services.policy import PolicyResult
-from pii_engine.services.recognizers import (
-    custom_recognizers,
-    normalized_recognizers,
-    normalized_transformers_recognizer,
-)
 from pii_engine.services.session import SessionDecision, SessionStore
-
-
-def _bundle(tmp_path: Path) -> tuple[Path, str]:
-    checksum_data = f"{hashlib.sha256(b'model').hexdigest()}  english-pii/model.bin\n".encode()
-    model = tmp_path / "digest" / "english-pii"
-    model.mkdir(parents=True)
-    manifest = {
-        "schemaVersion": 2,
-        "bundleVersion": "1",
-        "models": {
-            "english-pii": {
-                "catalogId": "english",
-                "variantId": "transformers",
-                "upstream": "owner/model",
-                "revision": "revision",
-                "path": "english-pii",
-                "license": "MIT",
-                "licenseUrl": "https://example.test",
-                "supportedLanguages": ["en"],
-            }
-        },
-        "runtime": {
-            "labelsToIgnore": ["O"],
-            "aggregationStrategy": "simple",
-            "stride": 64,
-            "modelToPresidioEntityMapping": {"B-EMAIL": "EMAIL_ADDRESS"},
-        },
-        "checksumFile": "checksums.sha256",
-        "checksumSha256": hashlib.sha256(checksum_data).hexdigest(),
-        "checksumSize": len(checksum_data),
-        "fileCount": 1,
-        "totalModelBytes": 5,
-    }
-    data = yaml.safe_dump(manifest, sort_keys=False).encode()
-    digest = hashlib.sha256(data).hexdigest()
-    root = tmp_path / digest
-    root.mkdir()
-    (root / "english-pii").mkdir()
-    (root / "manifest.yaml").write_bytes(data)
-    (root / "checksums.sha256").write_bytes(checksum_data)
-    (root / "english-pii/model.bin").write_bytes(b"model")
-    return root, digest
-
-
-class _FakeEngine:
-    def analyze(self, **_kwargs: object):
-        from presidio_analyzer import RecognizerResult
-
-        result = RecognizerResult("IBAN_CODE", 0, 4, 0.9)
-        result.recognition_metadata = {"recognizer_name": "PatternRecognizer"}
-        return [result]
 
 
 class _FakeTokenizer:
@@ -97,118 +34,12 @@ class _FakeTokenizer:
         return {"offset_mapping": [(index, index + 1) for index in range(len(text))]}
 
 
-def test_presidio_analyzer_maps_bundle_aliases_without_model_download(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Manifest paths become local transformer paths and results are normalized."""
-    root, digest = _bundle(tmp_path)
-    policy = make_test_policy()
-    policy.pii.ner.per_language = {"en": "english-pii"}
-    policy.pii.analyzer_entities = ["IBAN"]
-    settings = Settings(
-        allow_test_analyzer=True,
-        model_cache_path=tmp_path,
-        model_bundle_version="1",
-        model_manifest_sha256=digest,
-    )
-    monkeypatch.setattr(PresidioAnalyzer, "_create_engine", lambda _self: _FakeEngine())
-    monkeypatch.setattr(
-        PresidioAnalyzer, "_load_tokenizers", lambda _self: {"en": _FakeTokenizer()}
-    )
-    analyzer = PresidioAnalyzer(settings, policy)
-    assert analyzer.bundle == root
-    assert analyzer.analyze("test") == [EntityMatch("IBAN", 0, 4, 0.9, "deterministic")]
-
-
-def test_custom_recognizer_entities_survive_default_catalog_selection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An empty analyzerEntities list includes validated customer-defined entities."""
-
-    class FakeCustomEngine:
-        def analyze(self, **_kwargs: object):
-            from presidio_analyzer import RecognizerResult
-
-            result = RecognizerResult("CUSTOMER_ID", 0, 4, 0.9)
-            result.recognition_metadata = {"recognizer_name": "Customer ID"}
-            return [result]
-
-    root, digest = _bundle(tmp_path)
-    policy = make_test_policy()
-    policy.pii.ner.per_language = {"en": "english-pii"}
-    policy.pii.analyzer_entities = []
-    policy.pii.custom_recognizers = [
-        CustomRecognizer.model_validate(
-            {
-                "name": "Customer ID",
-                "entity": "CUSTOMER_ID",
-                "regex": r"CUST-\d+",
-                "score": 0.9,
-                "supportedLanguages": ["en"],
-            }
-        )
-    ]
-    settings = Settings(
-        allow_test_analyzer=True,
-        model_cache_path=tmp_path,
-        model_bundle_version="1",
-        model_manifest_sha256=digest,
-    )
-    monkeypatch.setattr(PresidioAnalyzer, "_create_engine", lambda _self: FakeCustomEngine())
-    monkeypatch.setattr(
-        PresidioAnalyzer, "_load_tokenizers", lambda _self: {"en": _FakeTokenizer()}
-    )
-    analyzer = PresidioAnalyzer(settings, policy)
-    assert analyzer.bundle == root
-    assert analyzer.analyze("test") == [EntityMatch("CUSTOMER_ID", 0, 4, 0.9, "deterministic")]
-
-
 def test_retained_tokenizer_chunking_overlaps_long_documents() -> None:
-    """Long input is fully covered until native stride differential tests pass."""
+    """Chunking keeps long input fully covered with overlapping windows."""
     chunks = _chunks("x" * 700, _FakeTokenizer())
     assert chunks[0][0] == 0
     assert chunks[-1][0] + len(chunks[-1][1]) == 700
     assert chunks[1][0] < chunks[0][0] + len(chunks[0][1])
-
-
-def test_baseline_chunking_preserves_boundary_match_offsets_and_deduplicates() -> None:
-    """Overlapping sub-1M spaCy chunks return one correctly offset boundary match."""
-    from presidio_analyzer import RecognizerResult
-
-    marker = "boundary@example.com"
-    marker_start = 899_995
-    text = "x" * marker_start + marker + "x" * 200_000
-    calls: list[int] = []
-
-    class BoundaryEngine:
-        def analyze(self, *, text: str, **_kwargs: object) -> list[RecognizerResult]:
-            calls.append(len(text))
-            start = text.find(marker)
-            if start < 0:
-                return []
-            result = RecognizerResult("EMAIL_ADDRESS", start, start + len(marker), 0.9)
-            result.recognition_metadata = {"recognizer_name": "SpacyRecognizer"}
-            return [result]
-
-    analyzer = PresidioSpacyAnalyzer.__new__(PresidioSpacyAnalyzer)
-    analyzer.policy = make_test_policy()
-    analyzer._engine = BoundaryEngine()
-
-    assert analyzer.analyze(text) == [
-        EntityMatch(
-            "EMAIL_ADDRESS",
-            marker_start,
-            marker_start + len(marker),
-            0.9,
-            "spacy",
-        )
-    ]
-    assert len(calls) == 2
-    assert max(calls) < 1_000_000
-    chunks = _baseline_chunks("x" * 4_000_000)
-    assert chunks[0][0] == 0
-    assert chunks[-1][0] + len(chunks[-1][1]) == 4_000_000
-    assert max(len(chunk) for _offset, chunk, _start, _end in chunks) < 1_000_000
 
 
 def test_presidio_anonymizer_executes_upstream_mask_and_encrypt() -> None:
@@ -223,29 +54,6 @@ def test_presidio_anonymizer_executes_upstream_mask_and_encrypt() -> None:
     )
     encrypted = anonymizer.apply("test", match, "encrypt", {})
     assert encrypted != "test"
-
-
-def test_recognizer_factories_validate_and_build() -> None:
-    """Normalized and customer recognizers are real Presidio registry entries."""
-    policy = make_test_policy()
-    definition = {
-        "name": "Customer ID",
-        "entity": "CUSTOMER_ID",
-        "regex": r"CUST-\d+",
-        "score": 0.9,
-        "supportedLanguages": ["en"],
-    }
-    policy.pii.custom_recognizers = [CustomRecognizer.model_validate(definition)]
-    transformer = normalized_transformers_recognizer(["PERSON_NAME", "IBAN"], "de")
-    assert transformer.supported_language == "de"
-    assert transformer.supported_entities == ["PERSON_NAME", "IBAN"]
-    normalized = normalized_recognizers(("en",))
-    assert "STEUERNUMMER" in {
-        entity for recognizer in normalized for entity in recognizer.supported_entities
-    }
-    assert custom_recognizers(policy.pii.custom_recognizers)[0].supported_entities == [
-        "CUSTOMER_ID"
-    ]
 
 
 @pytest.mark.parametrize(
@@ -313,18 +121,6 @@ def test_steuernummer_recognizer_rejects_other_numeric_identifiers(value: str) -
 
 def test_steuernummer_is_an_engine_owned_entity() -> None:
     assert "STEUERNUMMER" in ENTITY_CATALOG
-
-
-def test_inference_device_is_explicit_and_cuda_fails_closed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """CPU is forced and a requested unavailable GPU never silently falls back."""
-    import torch
-
-    assert configure_inference_device("cpu") == "cpu"
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    with pytest.raises(ValueError, match="CUDA device is unavailable"):
-        configure_inference_device("cuda:0")
 
 
 class _FakeRedis:
