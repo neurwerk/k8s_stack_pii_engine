@@ -49,11 +49,19 @@ class Settings(BaseSettings):
     hash_key: SecretStr | None = None
     encryption_key: SecretStr | None = None
     allow_test_analyzer: bool = False
+    analyzer_backend: Literal["local", "remote-gliner", "remote-kserve"] = "local"
+    remote_config: Path | None = None
+    remote_call_timeout: float = Field(default=10, gt=0, le=60)
+    remote_max_calls: int = Field(default=2048, ge=1, le=10000)
+    remote_max_response_bytes: int = Field(default=2_097_152, ge=1024, le=8_388_608)
+    remote_max_concurrent_calls: int = Field(default=1, ge=1, le=16)
 
     @model_validator(mode="after")
     def validate_runtime_contract(self) -> Settings:
         """Require complete production groups while allowing explicit isolated tests."""
         tls = (self.tls_cert, self.tls_key, self.tls_ca)
+        if self.analyzer_backend != "local" and self.remote_config is None:
+            raise ValueError("remote analyzer requires endpoint configuration")
         if any(tls) and not all(tls):
             raise ValueError("TLS cert, key, and CA must be configured together")
         model = (self.model_cache_path, self.model_bundle_version, self.model_manifest_sha256)

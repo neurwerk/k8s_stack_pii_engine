@@ -6,17 +6,17 @@ check-lock:
 	uv lock --check
 
 check-ruff:
-	uv run --extra cpu --extra dev ruff check src tests benchmarks scripts
-	uv run --extra cpu --extra dev ruff format --check src tests benchmarks scripts
+	uv run --frozen --extra dev ruff check src tests benchmarks scripts
+	uv run --frozen --extra dev ruff format --check src tests benchmarks scripts
 
 check-ty:
-	uv run --extra cpu --extra dev ty check
+	uv run --frozen --extra dev ty check
 
 check-test:
-	uv run --extra cpu --extra dev pytest --cov=src --cov-report=term-missing
+	uv run --frozen --extra dev pytest --cov=src --cov-report=term-missing
 
 benchmark:
-	uv run --extra cpu --extra dev python -m benchmarks.run_synthetic
+	uv run --frozen --extra dev python -m benchmarks.run_synthetic
 
 build:
 	docker --context desktop-linux build --build-arg ACCELERATOR=cpu -t pii-engine:local-cpu .
