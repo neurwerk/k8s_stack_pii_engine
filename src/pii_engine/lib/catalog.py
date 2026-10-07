@@ -30,6 +30,7 @@ STEUERNUMMER_PATTERNS: tuple[tuple[str, str], ...] = (
 
 ENTITY_CATALOG: tuple[str, ...] = (
     "SENSITIVE_TEXT",
+    "PRIVATE",
     "PERSON_NAME",
     "EMAIL_ADDRESS",
     "PHONE_NUMBER",

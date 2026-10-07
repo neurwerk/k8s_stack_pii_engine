@@ -23,6 +23,7 @@ from pii_engine.models.contracts import (
 from pii_engine.services.analyzer import Analyzer, EntityMatch
 from pii_engine.services.errors import AnalysisRequestTooLargeError, InvalidAnalysisRequestError
 from pii_engine.services.planner import ActionPlanner, LeafPlan, request_nonce
+from pii_engine.services.remote_http import analysis_budget
 from pii_engine.services.traversal import (
     TextLeaf,
     legacy_segments,
@@ -366,6 +367,23 @@ class PolicyService:
         return cast(PIIAction, action)
 
     def _prepare_plans(
+        self, leaves: list[TextLeaf], *, reroute_as_block: bool
+    ) -> tuple[
+        list[tuple[TextLeaf, LeafPlan]],
+        set[str],
+        dict[str, int],
+        list[str],
+        set[str],
+        int,
+    ]:
+        """Share a bounded remote-call budget across every independent leaf."""
+        with analysis_budget(
+            min(self.settings.analysis_timeout, self.policy.pii.timeout),
+            self.settings.remote_max_calls,
+        ):
+            return self._prepare_leaf_plans(leaves, reroute_as_block=reroute_as_block)
+
+    def _prepare_leaf_plans(
         self, leaves: list[TextLeaf], *, reroute_as_block: bool
     ) -> tuple[
         list[tuple[TextLeaf, LeafPlan]],

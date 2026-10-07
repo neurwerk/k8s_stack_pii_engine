@@ -47,6 +47,7 @@ from pii_engine.services.errors import InvalidAnalysisRequestError
 from pii_engine.services.limiter import AnalysisCapacityError, AnalysisLimiter
 from pii_engine.services.planner import ActionPlanner
 from pii_engine.services.policy import PolicyResult, PolicyService
+from pii_engine.services.remote_http import analysis_budget
 from pii_engine.services.session import RequestKind, SessionDecision, SessionStore
 from pii_engine.services.traversal import legacy_segments, restore_legacy_result
 
@@ -128,10 +129,12 @@ class EngineRuntime:
         self.device = (
             "test-cpu"
             if settings.allow_test_analyzer
-            else configure_inference_device(settings.device)
+            else configure_inference_device(
+                "cpu" if settings.analyzer_backend != "local" else settings.device
+            )
         )
         runtime_device.labels(device=self.device).set(1)
-        for mode in ("baseline", "transformer", "test"):
+        for mode in ("baseline", "transformer", "test", "remote-gliner", "remote-kserve"):
             runtime_analyzer_mode.labels(mode=mode).set(mode == self.analyzer_mode)
         analyzer = create_analyzer(settings, self.policy_settings, self.analyzer_mode)
         encryption_key = (
@@ -168,12 +171,18 @@ class EngineRuntime:
 
     async def close(self) -> None:
         """Release dynamic dependencies."""
+        close_analyzer = getattr(self._analyzer, "close", None)
+        if close_analyzer is not None:
+            await asyncio.to_thread(close_analyzer)
         if self.session is not None:
             await self.session.close()
 
     async def ready(self) -> bool:
         """Return current model, policy, key, and Valkey readiness."""
         if not self._static_ready or not self._cache_still_available():
+            return False
+        healthy_analyzer = getattr(self._analyzer, "healthy", None)
+        if healthy_analyzer is not None and not await asyncio.to_thread(healthy_analyzer):
             return False
         return self.session is None or await self.session.healthy()
 
@@ -410,9 +419,12 @@ class EngineRuntime:
                 started.set()
                 analysis_started = time.monotonic()
                 try:
-                    evaluation = await asyncio.to_thread(
-                        self._evaluate_policy_sync, request, raw_policy
-                    )
+                    with analysis_budget(
+                        self.settings.studio_analysis_timeout, self.settings.remote_max_calls
+                    ):
+                        evaluation = await asyncio.to_thread(
+                            self._evaluate_policy_sync, request, raw_policy
+                        )
                 finally:
                     elapsed = max(0.0, time.monotonic() - analysis_started)
                     analysis_duration_seconds.labels(caller="studio").observe(elapsed)
@@ -474,14 +486,18 @@ class EngineRuntime:
                 started.set()
                 analysis_started = time.monotonic()
                 try:
-                    if placeholder_namespace is None:
-                        result = await asyncio.to_thread(policy.analyze, request)
-                    else:
-                        result = await asyncio.to_thread(
-                            policy.analyze,
-                            request,
-                            placeholder_namespace=placeholder_namespace,
-                        )
+                    with analysis_budget(
+                        self._analysis_timeout(caller, policy.policy),
+                        self.settings.remote_max_calls,
+                    ):
+                        if placeholder_namespace is None:
+                            result = await asyncio.to_thread(policy.analyze, request)
+                        else:
+                            result = await asyncio.to_thread(
+                                policy.analyze,
+                                request,
+                                placeholder_namespace=placeholder_namespace,
+                            )
                 finally:
                     elapsed = max(0.0, time.monotonic() - analysis_started)
                     analysis_duration_seconds.labels(caller=caller).observe(elapsed)
@@ -684,7 +700,7 @@ class EngineRuntime:
 
     def _cache_still_available(self) -> bool:
         """Cheaply detect a lost immutable cache without rehashing models per probe."""
-        if self.analyzer_mode == "test":
+        if self.analyzer_mode in {"test", "remote-gliner", "remote-kserve"}:
             return True
         if self.analyzer_mode == "baseline":
             return not self.restart_required()

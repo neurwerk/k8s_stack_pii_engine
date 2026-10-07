@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "neurwerk-pii-engine"
-version = "0.11.0"
+version = "0.12.0"
 description = "Bounded, deterministic PII and safety policy service for LLM requests"
 readme = "README.md"
 license = "MIT"
@@ -117,7 +117,7 @@ known-first-party = ["pii_engine"]
 convention = "google"
 
 [[tool.ty.overrides]]
-include = ["src/pii_engine/services/analyzer.py", "src/pii_engine/services/recognizers.py"]
+include = ["src/pii_engine/services/analyzer.py", "src/pii_engine/services/recognizers.py", "src/pii_engine/services/remote_analyzer.py", "src/pii_engine/services/remote_tokens.py"]
 
 [tool.ty.overrides.analysis]
 # Lazy production-only imports are supplied by the CPU or CUDA image extra.

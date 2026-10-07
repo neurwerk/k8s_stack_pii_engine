@@ -24,6 +24,112 @@ This repository owns the engine service and model-sync CLI. Gateway adaptation,
 human authorization, Kubernetes charts, and deployment values are separate
 components.
 
+## External NER (Next Compatible Release)
+
+`PII_ENGINE_ANALYZER_BACKEND` selects `local` (unchanged default), `remote-gliner`,
+or `remote-kserve`. Remote mode keeps Presidio's deterministic and custom
+recognizers, policy actions, overlap handling and masking. It disables local NER;
+an unavailable external model never becomes a clean local fallback scan. The CPU
+image still supplies linguistic support, but remote inference needs no local GPU
+or transformer weights. `PRIVATE` is an independent entity, using its explicit
+client action or the policy's default action.
+
+Set `PII_ENGINE_REMOTE_CONFIG` to a trusted, read-only JSON file. For GLiNER:
+
+```json
+{
+  "models": [{
+    "name": "multilingual",
+    "kind": "gliner",
+    "model_name": "ner-multilingual",
+    "url": "https://ner.example.test/extract",
+    "languages": ["en", "de"],
+    "inference_threshold": 0.5
+  }]
+}
+```
+
+The server's actual threshold must be declared; policy `scoreThreshold` must be
+at least that value, including in Studio overrides. Default mappings match the
+inference manager's ten GLiNER labels. `medical condition` and `medication` map
+explicitly to `SENSITIVE_TEXT`; the others retain their normalized category.
+For different server labels, supply a complete `label_mapping` object. Unknown
+returned labels, invalid offsets/scores and wrong service identities fail closed.
+GLiNER runs once per short chunk even with both analysis languages selected.
+Overlapping character chunks are subdivided only after an explicit HTTP 413;
+unscannable small chunks fail rather than dropping content.
+
+For KServe, configure one or both models, each with one language:
+
+```json
+{
+  "models": [{
+    "name": "english",
+    "kind": "kserve",
+    "model_name": "ner-english",
+    "url": "https://ner.example.test/v1/models/ner-english:predict",
+    "languages": ["en"],
+    "tokenizer_path": "/remote-tokenizers/english"
+  }]
+}
+```
+
+The exact runtime filenames and SHA-256 pins are supplied by the Engine's model
+profile. Copy those files from the same immutable revision used on the server,
+including special-token files and SentencePiece assets; retain upstream license
+notices with the staged assets. Do not copy weights or add unverified files or
+symlinks. If notices are inside the tokenizer directory, add their digests through
+`tokenizer_sha256` alongside all the profile's pins. Required runtime digests
+cannot be changed. Stage the directories on the optional read-only tokenizer PVC
+before adoption; runtime never downloads them. Supported pins are:
+
+| Language | Upstream | Revision |
+| --- | --- | --- |
+| English | `ai4privacy/llama-ai4privacy-english-anonymiser-openpii` | `1efb619f6d9f5a84b5d6ccf65f1f45df961a2167` |
+| German | `OpenMed/OpenMed-PII-German-SuperClinical-Large-434M-v1` | `fa8d9c0186635e1ad74f667d320b9d90955523ad` |
+
+Pins and default label mappings are in `src/pii_engine/lib/remote_models.py`.
+English retains `PRIVATE`. German labels with a known normalized meaning keep
+it; the explicitly listed categories without an exact equivalent use
+`SENSITIVE_TEXT`, never guessed categories or discarded evidence. Review that
+entity's action before adoption. A custom mapping replaces the entire default;
+every non-`O` class must have a mapping before startup. `PRIVATE` cannot be renamed.
+BIO spans retain the strongest constituent confidence, so a weaker continuation
+cannot remove stronger sensitive evidence. All tokens, special tokens, class
+IDs, finite probabilities and normalization are validated before policy filtering.
+Only complete, rechecked windows of at most 512 tokens are sent.
+
+Readiness checks model service metadata, cached for five seconds; inference
+still validates each reply. The APIs expose service aliases, not weight revision
+attestations, so operators must verify the server assignment matches these pins.
+GLiNER's actual server threshold and configured labels must also be verified.
+
+Transport settings are `PII_ENGINE_REMOTE_CALL_TIMEOUT` (10 seconds),
+`PII_ENGINE_REMOTE_MAX_CALLS` (2048 across all leaves and selected models),
+`PII_ENGINE_REMOTE_MAX_RESPONSE_BYTES` (2 MiB per reply), and
+`PII_ENGINE_REMOTE_MAX_CONCURRENT_CALLS` (1 per process). Caller/policy deadlines
+also bound queued calls and subdivisions; Studio retains its 30-second ceiling.
+HTTP 429 and other errors fail immediately without retries or partial decisions.
+Keep one Engine replica or coordinate capacity externally when sharing a single
+GLiNER instance: the process limit is not a distributed lock.
+
+HTTPS verifies system trust. Private HTTP requires `allow_private_http: true`
+and operator-approved private-network/firewall isolation. Optional `api_key_file`
+reads a mounted bearer credential; chart consumers use `apiKeySecretRef` instead
+of putting keys in values. KServe's current `API_KEY` environment variable does
+not enforce authentication. No request text, response body, detected values or
+credentials are logged; proxies from the process environment and redirects are
+disabled.
+
+Base exposes these controls under `monitorPiiEngine.analyzerBackend` and
+`monitorPiiEngine.remote`. Remote mode needs explicit destination CIDRs/ports;
+KServe also needs `tokenizerClaimName`. Local cache mounts and bundle selection
+remain unchanged for local clients, and are absent from remote Engine Pods.
+Existing model-sync jobs may remain installed independently; remote clients do
+not depend on their readiness. Do not remove existing cache PVCs as part of a
+mode change. Publish and pin a compatible image before selecting remote mode;
+client adoption and deployment are separate approvals.
+
 ## Segment API
 
 `POST /v2/adapter/analyze-segments` accepts extracted text rather than provider JSON:

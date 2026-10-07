@@ -49,7 +49,7 @@ SPACY_IGNORED_ENTITY_LABELS = (
     "TIME",
     "WORK_OF_ART",
 )
-AnalyzerMode = Literal["baseline", "transformer", "test"]
+AnalyzerMode = Literal["baseline", "transformer", "test", "remote-gliner", "remote-kserve"]
 _BASELINE_CHUNK_CHARACTERS = 900_000
 _BASELINE_CHUNK_OVERLAP = 10_000
 
@@ -96,6 +96,8 @@ def resolve_analyzer_mode(settings: Settings) -> AnalyzerMode:
     """Select test, bundled baseline, or a verified transformer bundle."""
     if settings.allow_test_analyzer:
         return "test"
+    if settings.analyzer_backend != "local":
+        return settings.analyzer_backend
     reference = settings.model_bundle_reference
     if reference is None:
         return "baseline"
@@ -124,6 +126,10 @@ def create_analyzer(settings: Settings, policy: PolicySettings, mode: AnalyzerMo
         return DeterministicAnalyzer()
     if mode == "baseline":
         return PresidioSpacyAnalyzer(policy)
+    if mode in {"remote-gliner", "remote-kserve"}:
+        from pii_engine.services.remote_analyzer import RemoteAnalyzer
+
+        return RemoteAnalyzer(settings, policy)
     return PresidioAnalyzer(settings, policy)
 
 
@@ -294,11 +300,16 @@ class PresidioAnalyzer:
 class PresidioSpacyAnalyzer:
     """Run the bundled EN, DE, and NL spaCy models through Presidio."""
 
-    def __init__(self, policy: PolicySettings) -> None:
+    def __init__(self, policy: PolicySettings, *, include_ner: bool = True) -> None:
         """Eagerly load every policy-supported bundled spaCy model."""
         self.policy = policy
         validate_policy_selection(policy)
         self._engine = self._create_engine()
+        if not include_ner:
+            self._engine.registry.remove_recognizer("SpacyRecognizer")
+            for pipeline in self._engine.nlp_engine.nlp.values():
+                if "ner" in pipeline.pipe_names:
+                    pipeline.disable_pipe("ner")
 
     def analyze(self, text: str, policy: PolicySettings | None = None) -> list[EntityMatch]:
         """Analyze configured languages with baseline NER and Presidio recognizers."""
