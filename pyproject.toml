@@ -117,7 +117,7 @@ known-first-party = ["pii_engine"]
 convention = "google"
 
 [[tool.ty.overrides]]
-include = ["src/pii_engine/services/analyzer.py", "src/pii_engine/services/recognizers.py", "src/pii_engine/services/remote_analyzer.py", "src/pii_engine/services/remote_tokens.py"]
+include = ["src/pii_engine/services/analyzer.py", "src/pii_engine/services/rules.py", "src/pii_engine/services/recognizers.py", "src/pii_engine/services/remote_analyzer.py", "src/pii_engine/services/remote_tokens.py"]
 
 [tool.ty.overrides.analysis]
 # Lazy production-only imports are supplied by the CPU or CUDA image extra.

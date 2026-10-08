@@ -9,8 +9,10 @@ import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from pii_engine.config.ner import PROFILES, load_ner
 from pii_engine.config.remote import RemoteConfig
-from pii_engine.services.analyzer import EntityMatch, PresidioSpacyAnalyzer, _selected_entities
+from pii_engine.metrics import analysis_chunks_total
+from pii_engine.services.analyzer import EntityMatch, _selected_entities
 from pii_engine.services.remote_http import InputTooLargeError, RemoteAnalysisError, RemoteTransport
 from pii_engine.services.remote_tokens import decode_predictions, load_tokenizer, token_chunks
 
@@ -25,14 +27,35 @@ class RemoteAnalyzer:
 
     def __init__(self, settings: Settings, policy: PolicySettings) -> None:
         """Load only linguistic support and, for KServe, verified tokenizer files."""
-        if settings.remote_config is None:
+        self.language_models: dict[str, str] | None = None
+        if settings.ner_config is not None:
+            ner = load_ner(settings.ner_config)
+            config = RemoteConfig(models=[ner.remote_model(name) for name in ner.models])
+            self.language_models = ner.language_models
+            capacity = ner.capacity
+            settings = settings.model_copy(
+                update={
+                    "remote_call_timeout": capacity.call_timeout,
+                    "remote_max_calls": capacity.max_calls,
+                    "remote_max_response_bytes": capacity.max_response_bytes,
+                    "remote_max_concurrent_calls": capacity.max_concurrent_calls,
+                }
+            )
+        elif settings.remote_config is None:
             raise ValueError("remote model configuration is absent")
-        try:
-            config = RemoteConfig.model_validate(json.loads(settings.remote_config.read_bytes()))
-        except (OSError, ValueError, UnicodeError):
-            raise ValueError("remote model configuration is invalid") from None
-        expected = "gliner" if settings.analyzer_backend == "remote-gliner" else "kserve"
-        if any(model.kind != expected for model in config.models):
+        else:
+            try:
+                config = RemoteConfig.model_validate(
+                    json.loads(settings.remote_config.read_bytes())
+                )
+            except (OSError, ValueError, UnicodeError):
+                raise ValueError("remote model configuration is invalid") from None
+        expected = (
+            None
+            if settings.ner_config
+            else ("gliner" if settings.analyzer_backend == "remote-gliner" else "kserve")
+        )
+        if expected and any(model.kind != expected for model in config.models):
             raise ValueError("remote models do not match the selected analyzer backend")
         if expected == "gliner" and len(config.models) != 1:
             raise ValueError("multilingual GLiNER requires exactly one endpoint")
@@ -44,7 +67,6 @@ class RemoteAnalyzer:
         self.policy = policy
         self.transport = RemoteTransport(settings)
         # Remote mode retains Presidio patterns but never falls back to local NER.
-        self.baseline = PresidioSpacyAnalyzer(policy, include_ner=False)
         self.recognizers = [make_recognizer(model, self.transport) for model in self.models]
         self._health_lock = threading.Lock()
         self._health_checked = 0.0
@@ -64,13 +86,27 @@ class RemoteAnalyzer:
             return self._healthy
 
     def _validate_languages(self, policy: PolicySettings) -> None:
-        supported = {language for model in self.models for language in model.languages}
+        supported = (
+            set(self.language_models)
+            if self.language_models is not None
+            else {language for model in self.models for language in model.languages}
+        )
         if not set(policy.pii.analyzer_languages).issubset(supported):
             raise ValueError("remote model selection does not cover all analysis languages")
+        selected_names = (
+            {self.language_models[language] for language in policy.pii.analyzer_languages}
+            if self.language_models is not None
+            else None
+        )
         if any(
             model.inference_threshold is not None
             and policy.pii.score_threshold < model.inference_threshold
             for model in self.models
+            if (
+                model.name in selected_names
+                if selected_names is not None
+                else bool(set(model.languages).intersection(policy.pii.analyzer_languages))
+            )
         ):
             raise ValueError("policy threshold is below the remote detector's configured floor")
 
@@ -78,11 +114,18 @@ class RemoteAnalyzer:
         """Validate full remote coverage before returning policy-filtered matches."""
         active = policy or self.policy
         self._validate_languages(active)
-        matches = self.baseline.analyze(text, active)
+        matches: list[EntityMatch] = []
         if not text:
             return matches
         selected = _selected_entities(active)
+        selected_models = (
+            {self.language_models[language] for language in active.pii.analyzer_languages}
+            if self.language_models is not None
+            else None
+        )
         for model, recognizer in zip(self.models, self.recognizers, strict=True):
+            if selected_models is not None and model.name not in selected_models:
+                continue
             if not set(model.languages).intersection(active.pii.analyzer_languages):
                 continue
             for result in recognizer.analyze(text, list(selected), None):
@@ -149,13 +192,17 @@ def make_recognizer(model: RemoteModel, transport: RemoteTransport) -> Any:  # n
 def gliner_matches(text: str, model: RemoteModel, transport: RemoteTransport) -> list[EntityMatch]:
     """Subdivide only explicit size rejections; overlap without losing any characters."""
     pending = []
-    for offset in range(0, len(text), 896):
-        pending.append((offset, text[offset : offset + 1024]))
-        if offset + 1024 >= len(text):
+    profile = PROFILES.get(model.profile or "")
+    size = profile.max_characters if profile else 1024
+    overlap = profile.overlap_characters if profile else 128
+    for offset in range(0, len(text), size - overlap):
+        pending.append((offset, text[offset : offset + size]))
+        if offset + size >= len(text):
             break
     matches: list[EntityMatch] = []
     while pending:
         offset, chunk = pending.pop()
+        analysis_chunks_total.labels(stage="ner").inc()
         try:
             value = transport.request(model, {"text": chunk})
         except InputTooLargeError:
@@ -219,14 +266,17 @@ def kserve_matches(
 ) -> list[EntityMatch]:
     """Send one unpadded instance and verify the complete special-token layout."""
     matches: list[EntityMatch] = []
-    for offset, chunk in token_chunks(text, tokenizer):
+    profile = PROFILES.get(model.profile or "")
+    limit = profile.max_tokens if profile else 512
+    for offset, chunk in token_chunks(text, tokenizer, profile):
+        analysis_chunks_total.labels(stage="ner").inc()
         encoded = tokenizer(
             chunk,
             add_special_tokens=True,
             truncation=False,
             return_offsets_mapping=True,
         )
-        if len(encoded["input_ids"]) > 512:
+        if len(encoded["input_ids"]) > (limit or 512):
             raise RemoteAnalysisError("KServe input exceeds tokenizer limit")
         value = transport.request(model, {"instances": [chunk]})
         matches.extend(

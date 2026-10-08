@@ -11,6 +11,7 @@ from pii_engine.lib.bundle import (
     parse_manifest,
 )
 from pii_engine.lib.catalog import ENTITY_CATALOG, compiled_recognizers
+from pii_engine.metrics import analysis_chunks_total
 from pii_engine.services.recognizers import (
     custom_recognizers,
     normalized_recognizers,
@@ -18,6 +19,7 @@ from pii_engine.services.recognizers import (
 )
 
 if TYPE_CHECKING:
+    from pii_engine.config.ner import ModelProfile
     from pii_engine.config.policy import PolicySettings
     from pii_engine.config.settings import Settings
 
@@ -49,7 +51,16 @@ SPACY_IGNORED_ENTITY_LABELS = (
     "TIME",
     "WORK_OF_ART",
 )
-AnalyzerMode = Literal["baseline", "transformer", "test", "remote-gliner", "remote-kserve"]
+AnalyzerMode = Literal[
+    "baseline",
+    "transformer",
+    "test",
+    "remote-gliner",
+    "remote-kserve",
+    "local",
+    "remote",
+    "disabled",
+]
 _BASELINE_CHUNK_CHARACTERS = 900_000
 _BASELINE_CHUNK_OVERLAP = 10_000
 
@@ -96,6 +107,10 @@ def resolve_analyzer_mode(settings: Settings) -> AnalyzerMode:
     """Select test, bundled baseline, or a verified transformer bundle."""
     if settings.allow_test_analyzer:
         return "test"
+    if settings.ner_config is not None:
+        from pii_engine.config.ner import load_ner
+
+        return load_ner(settings.ner_config).mode
     if settings.analyzer_backend != "local":
         return settings.analyzer_backend
     reference = settings.model_bundle_reference
@@ -124,13 +139,29 @@ def create_analyzer(settings: Settings, policy: PolicySettings, mode: AnalyzerMo
     """Create the analyzer selected by the validated runtime mode."""
     if mode == "test":
         return DeterministicAnalyzer()
-    if mode == "baseline":
-        return PresidioSpacyAnalyzer(policy)
-    if mode in {"remote-gliner", "remote-kserve"}:
+    from pii_engine.services.layers import LayeredAnalyzer
+
+    return LayeredAnalyzer(settings, policy, mode)
+
+
+def create_ner_analyzer(settings: Settings, policy: PolicySettings, mode: AnalyzerMode) -> Analyzer:
+    """Construct only NER; the independent rules layer owns other recognizers."""
+    if mode in {"baseline", "local"}:
+        profiles = None
+        if settings.ner_config is not None:
+            from pii_engine.config.ner import PROFILES, load_ner
+
+            config = load_ner(settings.ner_config)
+            profiles = {
+                language: PROFILES[config.models[name].profile]
+                for language, name in config.language_models.items()
+            }
+        return PresidioSpacyAnalyzer(policy, ner_only=True, profiles=profiles)
+    if mode in {"remote-gliner", "remote-kserve", "remote"}:
         from pii_engine.services.remote_analyzer import RemoteAnalyzer
 
         return RemoteAnalyzer(settings, policy)
-    return PresidioAnalyzer(settings, policy)
+    return PresidioAnalyzer(settings, policy, ner_only=True)
 
 
 def configure_inference_device(device: str) -> str:
@@ -158,7 +189,9 @@ def configure_inference_device(device: str) -> str:
 class PresidioAnalyzer:
     """Load configured Presidio transformer engines entirely from local paths."""
 
-    def __init__(self, settings: Settings, policy: PolicySettings) -> None:
+    def __init__(
+        self, settings: Settings, policy: PolicySettings, *, ner_only: bool = False
+    ) -> None:
         """Validate bundle metadata and eagerly load every configured model."""
         bundle = settings.model_bundle_path
         digest = settings.model_manifest_sha256
@@ -168,6 +201,7 @@ class PresidioAnalyzer:
         manifest_data = (bundle / "manifest.yaml").read_bytes()
         self.manifest = parse_manifest(manifest_data, digest, version)
         self.policy = policy
+        self.ner_only = ner_only
         self.bundle = bundle
         self._loaded_aliases = self._selected_aliases(policy, tuple(policy.pii.supported_languages))
         self._validate_selection()
@@ -183,9 +217,14 @@ class PresidioAnalyzer:
         if any(self._loaded_aliases.get(language) != alias for language, alias in aliases.items()):
             raise ValueError("request policy selects a model that is not loaded")
         results: list[Any] = []
+        seen: set[str] = set()
         for language in active.pii.analyzer_languages:
+            if aliases[language] in seen:
+                continue
+            seen.add(aliases[language])
             tokenizer = self._tokenizers[language]
             for offset, chunk in _chunks(text, tokenizer):
+                analysis_chunks_total.labels(stage="ner").inc(bool(chunk))
                 for result in self._engine.analyze(
                     text=chunk,
                     language=language,
@@ -282,6 +321,10 @@ class PresidioAnalyzer:
         recognizers.extend(custom_recognizers(self.policy.pii.custom_recognizers))
         for recognizer in recognizers:
             engine.registry.add_recognizer(recognizer)
+        if self.ner_only:
+            engine.registry.recognizers = [
+                item for item in engine.registry.recognizers if "Transformer" in item.name
+            ]
         return engine
 
     def _load_tokenizers(self) -> dict[str, Any]:
@@ -300,11 +343,23 @@ class PresidioAnalyzer:
 class PresidioSpacyAnalyzer:
     """Run the bundled EN, DE, and NL spaCy models through Presidio."""
 
-    def __init__(self, policy: PolicySettings, *, include_ner: bool = True) -> None:
+    def __init__(
+        self,
+        policy: PolicySettings,
+        *,
+        include_ner: bool = True,
+        ner_only: bool = False,
+        profiles: dict[str, ModelProfile] | None = None,
+    ) -> None:
         """Eagerly load every policy-supported bundled spaCy model."""
         self.policy = policy
+        self.profiles = profiles or {}
         validate_policy_selection(policy)
         self._engine = self._create_engine()
+        if ner_only:
+            self._engine.registry.recognizers = [
+                item for item in self._engine.registry.recognizers if item.name == "SpacyRecognizer"
+            ]
         if not include_ner:
             self._engine.registry.remove_recognizer("SpacyRecognizer")
             for pipeline in self._engine.nlp_engine.nlp.values():
@@ -318,7 +373,14 @@ class PresidioSpacyAnalyzer:
         active = policy or self.policy
         results: list[Any] = []
         for language in active.pii.analyzer_languages:
-            for offset, chunk, owned_start, owned_end in _baseline_chunks(text):
+            profile = self.profiles.get(language)
+            chunks = _baseline_chunks(
+                text,
+                profile.max_characters if profile else _BASELINE_CHUNK_CHARACTERS,
+                profile.overlap_characters if profile else _BASELINE_CHUNK_OVERLAP,
+            )
+            for offset, chunk, owned_start, owned_end in chunks:
+                analysis_chunks_total.labels(stage="ner").inc(bool(chunk))
                 for result in self._engine.analyze(
                     text=chunk,
                     language=language,
@@ -354,14 +416,30 @@ class PresidioSpacyAnalyzer:
         from presidio_analyzer import AnalyzerEngine
         from presidio_analyzer.nlp_engine import NerModelConfiguration, SpacyNlpEngine
 
+        mapping = SPACY_ENTITY_MAPPING.copy()
+        ignored = list(SPACY_IGNORED_ENTITY_LABELS)
+        if self.profiles:
+            mapping = {}
+            ignored = []
+            for profile in self.profiles.values():
+                for label, entity in profile.label_mapping.items():
+                    if label in mapping and mapping[label] != entity:
+                        raise ValueError("local profiles have conflicting label mappings")
+                    mapping[label] = entity
+                ignored.extend(profile.ignored_labels)
         nlp_engine = SpacyNlpEngine(
             models=[
-                {"lang_code": language, "model_name": _spacy_model(language)}
+                {
+                    "lang_code": language,
+                    "model_name": self.profiles[language].upstream
+                    if language in self.profiles
+                    else _spacy_model(language),
+                }
                 for language in self.policy.pii.supported_languages
             ],
             ner_model_configuration=NerModelConfiguration(
-                model_to_presidio_entity_mapping=SPACY_ENTITY_MAPPING,
-                labels_to_ignore=list(SPACY_IGNORED_ENTITY_LABELS),
+                model_to_presidio_entity_mapping=mapping,
+                labels_to_ignore=sorted(set(ignored) - set(mapping)),
             ),
         )
         nlp_engine.load()
@@ -422,22 +500,29 @@ def _chunks(text: str, tokenizer: Any) -> list[tuple[int, str]]:  # noqa: ANN401
         window = offsets[start : start + max_tokens]
         if not window:
             break
-        chunk_start, chunk_end = window[0][0], window[-1][1]
+        chunk_start = 0 if start == 0 else window[0][0]
+        chunk_end = (
+            len(text) if start + max_tokens >= len(offsets) else offsets[start + max_tokens][0]
+        )
         chunks.append((chunk_start, text[chunk_start:chunk_end]))
         if start + max_tokens >= len(offsets):
             break
     return chunks
 
 
-def _baseline_chunks(text: str) -> list[tuple[int, str, int, int]]:
+def _baseline_chunks(
+    text: str,
+    size: int = _BASELINE_CHUNK_CHARACTERS,
+    overlap: int = _BASELINE_CHUNK_OVERLAP,
+) -> list[tuple[int, str, int, int]]:
     """Split baseline input below spaCy's limit with overlap and unique ownership."""
-    if len(text) <= _BASELINE_CHUNK_CHARACTERS:
+    if len(text) <= size:
         return [(0, text, 0, len(text))]
     chunks: list[tuple[int, str, int, int]] = []
-    for owned_start in range(0, len(text), _BASELINE_CHUNK_CHARACTERS):
-        owned_end = min(len(text), owned_start + _BASELINE_CHUNK_CHARACTERS)
-        chunk_start = max(0, owned_start - _BASELINE_CHUNK_OVERLAP)
-        chunk_end = min(len(text), owned_end + _BASELINE_CHUNK_OVERLAP)
+    for owned_start in range(0, len(text), size):
+        owned_end = min(len(text), owned_start + size)
+        chunk_start = max(0, owned_start - overlap)
+        chunk_end = min(len(text), owned_end + overlap)
         chunks.append((chunk_start, text[chunk_start:chunk_end], owned_start, owned_end))
     return chunks
 

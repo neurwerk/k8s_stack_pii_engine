@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     allow_test_analyzer: bool = False
     analyzer_backend: Literal["local", "remote-gliner", "remote-kserve"] = "local"
     remote_config: Path | None = None
+    ner_config: Path | None = None
     remote_call_timeout: float = Field(default=10, gt=0, le=60)
     remote_max_calls: int = Field(default=2048, ge=1, le=10000)
     remote_max_response_bytes: int = Field(default=2_097_152, ge=1024, le=8_388_608)
@@ -60,6 +61,7 @@ class Settings(BaseSettings):
     def validate_runtime_contract(self) -> Settings:
         """Require complete production groups while allowing explicit isolated tests."""
         tls = (self.tls_cert, self.tls_key, self.tls_ca)
+        self._validate_ner_contract()
         if self.analyzer_backend != "local" and self.remote_config is None:
             raise ValueError("remote analyzer requires endpoint configuration")
         if any(tls) and not all(tls):
@@ -79,6 +81,25 @@ class Settings(BaseSettings):
             if self.encryption_key is None or len(self.encryption_key.get_secret_value()) != 32:
                 raise ValueError("production runtime requires an exact 32-byte encryption key")
         return self
+
+    def _validate_ner_contract(self) -> None:
+        """Reject canonical selection combined with legacy selectors or CUDA."""
+        legacy = {
+            "analyzer_backend",
+            "remote_config",
+            "model_cache_path",
+            "model_bundle_reference",
+            "model_bundle_version",
+            "model_manifest_sha256",
+            "remote_call_timeout",
+            "remote_max_calls",
+            "remote_max_response_bytes",
+            "remote_max_concurrent_calls",
+        }
+        if self.ner_config is not None and legacy.intersection(self.model_fields_set):
+            raise ValueError("canonical NER conflicts with explicit legacy runtime settings")
+        if self.ner_config is not None and self.device != "cpu":
+            raise ValueError("canonical NER requires the CPU device")
 
     @property
     def model_bundle_path(self) -> Path | None:
