@@ -2,6 +2,15 @@
 
 from prometheus_client import Counter, Gauge, Histogram
 
+analysis_stage_duration_seconds = Histogram(
+    "pii_engine_analysis_stage_duration_seconds",
+    "Detector work and remote admission wait",
+    ["stage"],
+)
+analysis_chunks_total = Counter(
+    "pii_engine_analysis_chunks_total", "Detector input chunks", ["stage"]
+)
+
 policy_requests_total = Counter(
     "pii_engine_policy_requests_total", "Policy request outcomes", ["caller", "decision"]
 )

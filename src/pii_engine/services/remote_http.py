@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from pii_engine.metrics import analysis_stage_duration_seconds
+
 if TYPE_CHECKING:
     from pii_engine.config.remote import RemoteModel
     from pii_engine.config.settings import Settings
@@ -89,7 +91,12 @@ class RemoteTransport:
             raise RemoteAnalysisError("remote analysis call budget exceeded")
         budget.remaining -= 1
         remaining = budget.deadline - time.monotonic()
-        if remaining <= 0 or not self._capacity.acquire(timeout=max(0, remaining)):
+        started = time.monotonic()
+        try:
+            acquired = remaining > 0 and self._capacity.acquire(timeout=max(0, remaining))
+        finally:
+            analysis_stage_duration_seconds.labels(stage="wait").observe(time.monotonic() - started)
+        if not acquired:
             raise RemoteAnalysisError("remote analysis deadline exceeded")
         try:
             return self._request(model, payload, budget)

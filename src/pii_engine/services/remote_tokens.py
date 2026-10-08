@@ -14,14 +14,19 @@ from pii_engine.services.analyzer import EntityMatch
 from pii_engine.services.remote_http import RemoteAnalysisError
 
 if TYPE_CHECKING:
+    from pii_engine.config.ner import ModelProfile
     from pii_engine.config.remote import RemoteModel
 
 
 def load_tokenizer(model: RemoteModel) -> tuple[Any, dict[str, str]]:
     """Require a checksum-pinned tokenizer-only directory from the selected revision."""
-    if len(model.languages) != 1 or KSERVE_MODEL_PINS.get(model.languages[0]) != (
-        model.upstream,
-        model.revision,
+    if model.profile is None and (
+        len(model.languages) != 1
+        or KSERVE_MODEL_PINS.get(model.languages[0])
+        != (
+            model.upstream,
+            model.revision,
+        )
     ):
         raise ValueError("KServe model does not match a supported immutable model pin")
     root = model.tokenizer_path
@@ -29,7 +34,11 @@ def load_tokenizer(model: RemoteModel) -> tuple[Any, dict[str, str]]:
         model.tokenizer_sha256
     ):
         raise ValueError("KServe tokenizer configuration is incomplete")
-    expected = KSERVE_TOKENIZER_SHA256[model.languages[0]]
+    expected = (
+        KSERVE_TOKENIZER_SHA256[model.languages[0]]
+        if model.profile is None
+        else model.tokenizer_sha256
+    )
     if not expected.items() <= model.tokenizer_sha256.items():
         raise ValueError("KServe tokenizer digests do not match the supported immutable revision")
     _verify_files(root, model.tokenizer_sha256)
@@ -76,14 +85,21 @@ def _verify_files(root: Path, digests: dict[str, str]) -> None:
         raise ValueError("tokenizer directory contains unverified files")
 
 
-def token_chunks(text: str, tokenizer: Any) -> Iterator[tuple[int, str]]:  # noqa: ANN401
+def token_chunks(
+    text: str,
+    tokenizer: Any,  # noqa: ANN401
+    profile: ModelProfile | None = None,
+) -> Iterator[tuple[int, str]]:
     """Cover all characters with overlapping windows, rechecking retokenized sizes."""
     encoded = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
     offsets = [(start, end) for start, end in encoded["offset_mapping"] if start < end]
     pending = []
-    for index in range(0, len(offsets), 384):
+    window = profile.window_tokens if profile else 448
+    overlap = profile.overlap_tokens if profile else 64
+    limit = profile.max_tokens if profile else 512
+    for index in range(0, len(offsets), window - overlap):
         start = 0 if index == 0 else offsets[index][0]
-        end = len(text) if index + 448 >= len(offsets) else offsets[index + 448][0]
+        end = len(text) if index + window >= len(offsets) else offsets[index + window][0]
         pending.append((start, text[start:end]))
         if end == len(text):
             break
@@ -98,12 +114,12 @@ def token_chunks(text: str, tokenizer: Any) -> Iterator[tuple[int, str]]:  # noq
             truncation=False,
             return_offsets_mapping=True,
         )
-        if len(encoded["input_ids"]) <= 512:
+        if len(encoded["input_ids"]) <= (limit or 512):
             yield offset, chunk
             continue
         offsets = [end for start, end in encoded["offset_mapping"] if start < end]
         # Reserve space for special tokens and retokenization at window boundaries.
-        boundary = offsets[min(448, len(offsets) - 1)]
+        boundary = offsets[min(window, len(offsets) - 1)]
         if boundary <= 64 or boundary >= len(chunk):
             raise RemoteAnalysisError("tokenizer cannot produce bounded complete chunks")
         pending.append((offset + boundary - 64, chunk[boundary - 64 :]))

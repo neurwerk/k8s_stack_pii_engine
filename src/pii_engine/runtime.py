@@ -121,6 +121,12 @@ class EngineRuntime:
         """Eagerly validate all static dependencies and load configured models."""
         self.settings = settings
         self.policy_settings = self._load_policy()
+        if settings.ner_config is not None:
+            from pii_engine.config.ner import load_ner
+
+            capacity = load_ner(settings.ner_config).capacity
+            settings = settings.model_copy(update={"remote_max_calls": capacity.max_calls})
+            self.settings = settings
         try:
             self.analyzer_mode = resolve_analyzer_mode(settings)
         except ValueError as exc:
@@ -130,11 +136,22 @@ class EngineRuntime:
             "test-cpu"
             if settings.allow_test_analyzer
             else configure_inference_device(
-                "cpu" if settings.analyzer_backend != "local" else settings.device
+                "cpu"
+                if settings.ner_config or settings.analyzer_backend != "local"
+                else settings.device
             )
         )
         runtime_device.labels(device=self.device).set(1)
-        for mode in ("baseline", "transformer", "test", "remote-gliner", "remote-kserve"):
+        for mode in (
+            "baseline",
+            "transformer",
+            "test",
+            "remote-gliner",
+            "remote-kserve",
+            "local",
+            "remote",
+            "disabled",
+        ):
             runtime_analyzer_mode.labels(mode=mode).set(mode == self.analyzer_mode)
         analyzer = create_analyzer(settings, self.policy_settings, self.analyzer_mode)
         encryption_key = (
@@ -562,6 +579,9 @@ class EngineRuntime:
         )
 
     def _policy_service(self, policy: PolicySettings) -> PolicyService:
+        validator = getattr(self._analyzer, "validate_policy", None)
+        if validator is not None:
+            validator(policy)
         planner = ActionPlanner(
             policy,
             self._anonymizer,
@@ -700,7 +720,14 @@ class EngineRuntime:
 
     def _cache_still_available(self) -> bool:
         """Cheaply detect a lost immutable cache without rehashing models per probe."""
-        if self.analyzer_mode in {"test", "remote-gliner", "remote-kserve"}:
+        if self.analyzer_mode in {
+            "test",
+            "remote-gliner",
+            "remote-kserve",
+            "local",
+            "remote",
+            "disabled",
+        }:
             return True
         if self.analyzer_mode == "baseline":
             return not self.restart_required()

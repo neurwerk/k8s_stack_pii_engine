@@ -119,7 +119,8 @@ def _bsn_recognizer(language: str) -> Any:  # noqa: ANN401
         def validate_result(self, pattern_text: str) -> bool:
             weights = (9, 8, 7, 6, 5, 4, 3, 2, -1)
             return (
-                sum(
+                pattern_text != "000000000"
+                and sum(
                     int(digit) * weight for digit, weight in zip(pattern_text, weights, strict=True)
                 )
                 % 11
@@ -130,7 +131,7 @@ def _bsn_recognizer(language: str) -> Any:  # noqa: ANN401
         Any,
         BsnRecognizer(
             supported_entity="BSN",
-            patterns=[Pattern("Dutch BSN", r"\b\d{9}\b", 0.85)],
+            patterns=[Pattern("Dutch BSN", r"\b[0-9]{9}\b", 0.85)],
             context=["bsn", "burgerservicenummer"],
             supported_language=language,
         ),

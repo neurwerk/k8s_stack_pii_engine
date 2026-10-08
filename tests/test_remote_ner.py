@@ -15,7 +15,7 @@ from pii_engine.config.policy import test_policy as make_test_policy
 from pii_engine.config.remote import RemoteModel
 from pii_engine.config.settings import Settings
 from pii_engine.runtime import EngineRuntime
-from pii_engine.services.analyzer import EntityMatch, resolve_analyzer_mode
+from pii_engine.services.analyzer import resolve_analyzer_mode
 from pii_engine.services.remote_analyzer import RemoteAnalyzer, gliner_matches, kserve_matches
 from pii_engine.services.remote_http import RemoteAnalysisError, RemoteTransport, analysis_budget
 from pii_engine.services.remote_tokens import (
@@ -299,6 +299,7 @@ def test_remote_mode_does_not_select_a_local_transformer_bundle(tmp_path):
 
 def test_policy_cannot_request_below_gliner_detection_floor():
     analyzer = object.__new__(RemoteAnalyzer)
+    analyzer.language_models = None
     analyzer.models = [gliner(inference_threshold=0.5)]
     with pytest.raises(ValueError, match="floor"):
         analyzer._validate_languages(make_test_policy())
@@ -366,7 +367,8 @@ async def test_remote_failure_propagates_through_policy_without_a_pass():
     await runtime.close()
 
 
-def test_presidio_coordinator_calls_multilingual_service_once(monkeypatch, tmp_path):
+@pytest.mark.parametrize("canonical", [False, True])
+def test_presidio_coordinator_calls_multilingual_service_once(monkeypatch, tmp_path, canonical):
     class FakeRecognizer:
         def __init__(self, supported_entities, **_kwargs):
             self.supported_entities = supported_entities
@@ -375,10 +377,6 @@ def test_presidio_coordinator_calls_multilingual_service_once(monkeypatch, tmp_p
         def __init__(self, entity_type, start, end, score):
             self.entity_type, self.start, self.end, self.score = entity_type, start, end, score
 
-    class Patterns:
-        def analyze(self, _text, _policy):
-            return [EntityMatch("EMAIL_ADDRESS", 0, 3, 0.9, "deterministic")]
-
     monkeypatch.setitem(
         sys.modules,
         "presidio_analyzer",
@@ -386,9 +384,6 @@ def test_presidio_coordinator_calls_multilingual_service_once(monkeypatch, tmp_p
             RemoteRecognizer=FakeRecognizer,
             RecognizerResult=FakeResult,
         ),
-    )
-    monkeypatch.setattr(
-        remote_module, "PresidioSpacyAnalyzer", lambda _policy, **_kwargs: Patterns()
     )
     calls = []
 
@@ -399,16 +394,33 @@ def test_presidio_coordinator_calls_multilingual_service_once(monkeypatch, tmp_p
     remote = transport(handler)
     monkeypatch.setattr(remote_module, "RemoteTransport", lambda _settings: remote)
     path = tmp_path / "remote.json"
-    path.write_text(json.dumps({"models": [gliner().model_dump(mode="json")]}))
+    if canonical:
+        path.write_text(
+            json.dumps(
+                {
+                    "mode": "remote",
+                    "languageModels": {"en": "multilingual", "de": "multilingual"},
+                    "models": {
+                        "multilingual": {
+                            "profile": "gliner-multilingual-pii-v1",
+                            "endpoint": "https://ner.example.com/extract",
+                            "inferenceThreshold": 0.4,
+                        }
+                    },
+                }
+            )
+        )
+        settings = Settings(ner_config=path)
+    else:
+        path.write_text(json.dumps({"models": [gliner().model_dump(mode="json")]}))
+        settings = Settings(remote_config=path, analyzer_backend="remote-gliner")
     policy = make_test_policy()
     policy.pii.analyzer_languages = ["en", "de"]
-    analyzer = RemoteAnalyzer(
-        Settings(remote_config=path, analyzer_backend="remote-gliner"), policy
-    )
+    analyzer = RemoteAnalyzer(settings, policy)
     with analysis_budget(5, 1):
         matches = analyzer.analyze("Mixed text 😀")
     assert len(calls) == 1
-    assert matches[0].source == "deterministic"
+    assert matches == []  # Rules are composed separately, not repeated inside NER.
     analyzer.close()
 
 

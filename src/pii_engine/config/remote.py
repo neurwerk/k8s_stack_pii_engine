@@ -34,6 +34,7 @@ class RemoteModel(BaseModel):
     upstream: str | None = None
     revision: str | None = None
     inference_threshold: float | None = Field(default=None, ge=0, le=1)
+    profile: str | None = None
 
     @model_validator(mode="after")
     def validate_contract(self) -> RemoteModel:
@@ -51,7 +52,20 @@ class RemoteModel(BaseModel):
         return self
 
     def _apply_profile(self) -> None:
-        if self.kind == "kserve":
+        if self.profile is not None:
+            from pii_engine.config.ner import PROFILES
+
+            profile = PROFILES.get(self.profile)
+            if profile is None or (
+                self.kind != profile.kind
+                or self.languages != profile.languages
+                or self.upstream != profile.upstream
+                or (profile.revision is not None and self.revision != profile.revision)
+                or self.label_mapping != profile.label_mapping
+                or self.tokenizer_sha256 != profile.tokenizer_sha256
+            ):
+                raise ValueError("remote model does not match its reviewed profile")
+        if self.kind == "kserve" and self.profile is None:
             if len(self.languages) != 1 or self.languages[0] not in KSERVE_MODEL_PINS:
                 raise ValueError("KServe requires one supported English or German model")
             upstream, revision = KSERVE_MODEL_PINS[self.languages[0]]
