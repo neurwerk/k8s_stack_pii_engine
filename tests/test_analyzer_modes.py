@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 import pii_engine.runtime as runtime_module
 from pii_engine.config.policy import test_policy as make_test_policy
@@ -15,6 +18,7 @@ from pii_engine.config.settings import Settings
 from pii_engine.runtime import EngineRuntime
 from pii_engine.services.analyzer import (
     DeterministicAnalyzer,
+    configure_cpu_inference,
     resolve_analyzer_mode,
 )
 
@@ -22,7 +26,7 @@ from pii_engine.services.analyzer import (
 @pytest.fixture(autouse=True)
 def isolated_inference(monkeypatch: pytest.MonkeyPatch) -> None:
     """Exercise production mode selection and readiness without model inference."""
-    monkeypatch.setattr(runtime_module, "configure_inference_device", lambda _device: "cpu")
+    monkeypatch.setattr(runtime_module, "configure_cpu_inference", lambda: None)
     monkeypatch.setattr(runtime_module, "create_analyzer", lambda *_args: DeterministicAnalyzer())
 
 
@@ -92,6 +96,37 @@ def _write_reference(path: Path, digest: str, version: str = "1") -> None:
         json.dumps({"schemaVersion": 1, "bundleVersion": version, "manifestSha256": digest}),
         encoding="ascii",
     )
+
+
+def test_production_startup_selects_cpu_before_creating_analyzer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+    monkeypatch.setattr(runtime_module, "configure_cpu_inference", lambda: calls.append("cpu"))
+
+    def create(*_args: object) -> DeterministicAnalyzer:
+        calls.append("analyzer")
+        return DeterministicAnalyzer()
+
+    monkeypatch.setattr(runtime_module, "create_analyzer", create)
+    runtime = EngineRuntime(_production_settings(_policy_file(tmp_path)))
+    assert calls == ["cpu", "analyzer"]
+    assert runtime.device == "cpu"
+
+
+def test_cpu_initialization_requires_spacy_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+    monkeypatch.setitem(
+        sys.modules, "spacy", SimpleNamespace(require_cpu=lambda: calls.append("cpu"))
+    )
+    configure_cpu_inference()
+    assert calls == ["cpu"]
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda", "cuda:0"])
+def test_removed_device_setting_is_rejected(device: str) -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Settings.model_validate({"allow_test_analyzer": True, "device": device})
 
 
 def test_auto_mode_uses_baseline_when_desired_reference_is_absent(tmp_path: Path) -> None:

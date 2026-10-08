@@ -31,40 +31,25 @@ Project-owned content is licensed under the [MIT License](LICENSE). Third-party 
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for provenance and licensing information for dependencies and model assets.
 
-## Manual image publication
+## Release image and validation
 
-After the release change is merged, run from the clean canonical checkout:
+PII Engine publishes one `linux/amd64` image:
+`ghcr.io/neurwerk/k8s-stack-pii-engine:<version>`. The Engine runs on CPU,
+including local NER and transformer bundles. Remote inference services may use
+GPUs independently; the Engine does not select their hardware.
 
-```bash
-./deploy.sh --help
-./deploy.sh 0.13.0
-```
+After a reviewed release change is merged, authorized publication uses GitHub
+Actions from the exact `v<version>` Git tag. The tag must match `pyproject.toml`
+and `uv.lock`. CI publishes no `latest` tag and records the image digest in the
+GitHub Release. A retry reuses an existing tag only after verifying its platform,
+source revision and version; a mismatch stops publication without overwriting it.
+Image publication, verified Base pin adoption and deployment are separate actions.
 
-Select CPU, CUDA 12.4 (`cu124`), or both; choose GHCR push or local load, then
-confirm `Proceed`. Builds use the existing Dockerfile and locked dependencies,
-target only `linux/amd64`, and use Docker context `desktop-linux` unless
-`DOCKER_CONTEXT` is set. Python 3.11+, Git and Docker Buildx are required.
-The version must match both `pyproject.toml` and `uv.lock`.
-
-Push requires clean HEAD equal to freshly fetched canonical `origin/main`.
-Use existing Docker authentication or choose login with `GHCR_USERNAME` and
-`GHCR_TOKEN` (missing credentials are prompted; token input is hidden).
-All selected tags are checked before any build. Existing tags stop publication;
-deselect already-published variants to resume. A small anonymous GHCR manifest
-preflight accepts only HTTP 404 with explicit `MANIFEST_UNKNOWN` / `NAME_UNKNOWN`
-JSON errors, not Docker's ambiguous `not found` text. Authentication, transport
-and other registry errors stop publication. This read-only check does not prove
-push permission; publication uses your Docker credentials.
-Local load skips login and registry checks, but still requires a clean checkout.
-Both modes build a committed-file snapshot, excluding ignored workstation files.
-
-Results include the source commit and digest-pinned `0.13.0-cpu` / `0.13.0-cu124`
-references; a locally loaded result is not proof of registry publication.
-For post-publication status, use `uv run package-checker --json` from
-`tooling/cli_tools/package_checker` in the workspace. Independently verify images
-before adopting platform pins. The script does not create Git tags or GitHub
-Releases, update Base, or deploy to a cluster. Tag-triggered CI publication remains
-separate; it must not race manual publication of the same immutable tags.
+`make check` installs base and development dependencies only, without model
+inference dependencies. Production startup requires `uv sync --frozen --extra
+inference`; the release image includes the locked inference dependencies and
+offline English, German and Dutch spaCy models. `make build` builds a local
+image without publishing it.
 
 ## Independent rules and NER configuration
 

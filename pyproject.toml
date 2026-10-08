@@ -25,22 +25,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Production inference dependencies belong to image variants, not PR validation.
-cpu = [
+# Production inference dependencies belong to the release image, not PR validation.
+inference = [
     "de-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/de_core_news_sm-3.8.0/de_core_news_sm-3.8.0-py3-none-any.whl",
     "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
     "nl-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/nl_core_news_sm-3.8.0/nl_core_news_sm-3.8.0-py3-none-any.whl",
     "presidio-analyzer[transformers]==2.2.360",
     "torch==2.6.0",
-    "transformers==4.57.3",
-]
-cu124 = [
-    "cupy-cuda12x==13.6.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "de-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/de_core_news_sm-3.8.0/de_core_news_sm-3.8.0-py3-none-any.whl",
-    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
-    "nl-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/nl_core_news_sm-3.8.0/nl_core_news_sm-3.8.0-py3-none-any.whl",
-    "presidio-analyzer[transformers]==2.2.360",
-    "torch==2.6.0; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "transformers==4.57.3",
 ]
 dev = [
@@ -68,29 +59,15 @@ packages = ["src/pii_engine"]
 [tool.hatch.metadata]
 allow-direct-references = true
 
-[tool.uv]
-conflicts = [
-    [
-        { extra = "cpu" },
-        { extra = "cu124" },
-    ],
-]
-
 [tool.uv.sources]
 neurwerk-request-segments = { path = "vendor/request_segments" }
 torch = [
-    { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux'" },
-    { index = "pytorch-cu124", extra = "cu124", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
 explicit = true
 
 [tool.ruff]
@@ -120,8 +97,8 @@ convention = "google"
 include = ["src/pii_engine/services/analyzer.py", "src/pii_engine/services/rules.py", "src/pii_engine/services/recognizers.py", "src/pii_engine/services/remote_analyzer.py", "src/pii_engine/services/remote_tokens.py"]
 
 [tool.ty.overrides.analysis]
-# Lazy production-only imports are supplied by the CPU or CUDA image extra.
-allowed-unresolved-imports = ["presidio_analyzer.**", "spacy", "thinc.api", "torch", "transformers"]
+# Lazy production-only imports are supplied by the inference extra.
+allowed-unresolved-imports = ["presidio_analyzer.**", "spacy", "torch", "transformers"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

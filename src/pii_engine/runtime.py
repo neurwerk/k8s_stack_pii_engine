@@ -37,7 +37,7 @@ from pii_engine.models.contracts import (
 )
 from pii_engine.models.studio import EvaluationIssueStage, PolicyEvaluationIssue
 from pii_engine.services.analyzer import (
-    configure_inference_device,
+    configure_cpu_inference,
     create_analyzer,
     resolve_analyzer_mode,
     validate_policy_selection,
@@ -132,15 +132,9 @@ class EngineRuntime:
         except ValueError as exc:
             raise RuntimeNotReadyError("analyzer selection failed") from exc
         self._static_ready = True
-        self.device = (
-            "test-cpu"
-            if settings.allow_test_analyzer
-            else configure_inference_device(
-                "cpu"
-                if settings.ner_config or settings.analyzer_backend != "local"
-                else settings.device
-            )
-        )
+        if not settings.allow_test_analyzer:
+            configure_cpu_inference()
+        self.device = "cpu"
         runtime_device.labels(device=self.device).set(1)
         for mode in (
             "baseline",
