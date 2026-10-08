@@ -31,6 +31,41 @@ Project-owned content is licensed under the [MIT License](LICENSE). Third-party 
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for provenance and licensing information for dependencies and model assets.
 
+## Manual image publication
+
+After the release change is merged, run from the clean canonical checkout:
+
+```bash
+./deploy.sh --help
+./deploy.sh 0.13.0
+```
+
+Select CPU, CUDA 12.4 (`cu124`), or both; choose GHCR push or local load, then
+confirm `Proceed`. Builds use the existing Dockerfile and locked dependencies,
+target only `linux/amd64`, and use Docker context `desktop-linux` unless
+`DOCKER_CONTEXT` is set. Python 3.11+, Git and Docker Buildx are required.
+The version must match both `pyproject.toml` and `uv.lock`.
+
+Push requires clean HEAD equal to freshly fetched canonical `origin/main`.
+Use existing Docker authentication or choose login with `GHCR_USERNAME` and
+`GHCR_TOKEN` (missing credentials are prompted; token input is hidden).
+All selected tags are checked before any build. Existing tags stop publication;
+deselect already-published variants to resume. A small anonymous GHCR manifest
+preflight accepts only HTTP 404 with explicit `MANIFEST_UNKNOWN` / `NAME_UNKNOWN`
+JSON errors, not Docker's ambiguous `not found` text. Authentication, transport
+and other registry errors stop publication. This read-only check does not prove
+push permission; publication uses your Docker credentials.
+Local load skips login and registry checks, but still requires a clean checkout.
+Both modes build a committed-file snapshot, excluding ignored workstation files.
+
+Results include the source commit and digest-pinned `0.13.0-cpu` / `0.13.0-cu124`
+references; a locally loaded result is not proof of registry publication.
+For post-publication status, use `uv run package-checker --json` from
+`tooling/cli_tools/package_checker` in the workspace. Independently verify images
+before adopting platform pins. The script does not create Git tags or GitHub
+Releases, update Base, or deploy to a cluster. Tag-triggered CI publication remains
+separate; it must not race manual publication of the same immutable tags.
+
 ## Independent rules and NER configuration
 
 Production analysis runs CPU rules/checksums/custom recognizers over each original
