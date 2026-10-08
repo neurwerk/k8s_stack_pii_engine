@@ -179,6 +179,9 @@ class EngineRuntime:
         """Connect required dynamic dependencies before reporting readiness."""
         if self.session is not None:
             await self.session.start()
+        start_analyzer = getattr(self._analyzer, "start", None)
+        if start_analyzer is not None:
+            start_analyzer()
 
     async def close(self) -> None:
         """Release dynamic dependencies."""

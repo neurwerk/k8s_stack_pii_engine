@@ -210,10 +210,8 @@ class PresidioAnalyzer:
             tokenizer = self._tokenizers[language]
             for offset, chunk in _chunks(text, tokenizer):
                 analysis_chunks_total.labels(stage="ner").inc(bool(chunk))
-                for result in self._engine.analyze(
-                    text=chunk,
-                    language=language,
-                    score_threshold=active.pii.score_threshold,
+                for result in _local_window_results(
+                    self, chunk, language, active.pii.score_threshold
                 ):
                     result.entity_type = _PRESIDIO_TO_NORMALIZED.get(
                         result.entity_type, result.entity_type
@@ -366,10 +364,8 @@ class PresidioSpacyAnalyzer:
             )
             for offset, chunk, owned_start, owned_end in chunks:
                 analysis_chunks_total.labels(stage="ner").inc(bool(chunk))
-                for result in self._engine.analyze(
-                    text=chunk,
-                    language=language,
-                    score_threshold=active.pii.score_threshold,
+                for result in _local_window_results(
+                    self, chunk, language, active.pii.score_threshold
                 ):
                     result.entity_type = _PRESIDIO_TO_NORMALIZED.get(
                         result.entity_type, result.entity_type
@@ -510,6 +506,45 @@ def _baseline_chunks(
         chunk_end = min(len(text), owned_end + overlap)
         chunks.append((chunk_start, text[chunk_start:chunk_end], owned_start, owned_end))
     return chunks
+
+
+def _local_window_results(
+    analyzer: PresidioAnalyzer | PresidioSpacyAnalyzer, text: str, language: str, threshold: float
+) -> list[Any]:
+    """Cache only immutable relative NER spans; return fresh Presidio results."""
+    from presidio_analyzer import RecognizerResult
+
+    cache = getattr(analyzer, "window_cache", None)
+    if cache is None:
+        return analyzer._engine.analyze(text=text, language=language, score_threshold=threshold)
+
+    def detect() -> tuple[EntityMatch, ...]:
+        return tuple(
+            EntityMatch(
+                _PRESIDIO_TO_NORMALIZED.get(item.entity_type, item.entity_type),
+                item.start,
+                item.end,
+                float(item.score),
+                _recognizer_source(item),
+            )
+            for item in analyzer._engine.analyze(
+                text=text, language=language, score_threshold=threshold
+            )
+        )
+
+    context = getattr(analyzer, "cache_namespace", b"") + f"{language}:{threshold!r}".encode()
+    findings = cache.run(text, context, detect)
+    names = {"spacy": "SpacyRecognizer", "transformer": "TransformersRecognizer"}
+    return [
+        RecognizerResult(
+            item.entity_type,
+            item.start,
+            item.end,
+            item.score,
+            recognition_metadata={"recognizer_name": names.get(item.source, "presidio")},
+        )
+        for item in findings
+    ]
 
 
 def _recognizer_source(result: Any) -> str:  # noqa: ANN401

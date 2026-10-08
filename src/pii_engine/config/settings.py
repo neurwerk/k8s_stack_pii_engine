@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     analyzer_backend: Literal["local", "remote-gliner", "remote-kserve"] = "local"
     remote_config: Path | None = None
     ner_config: Path | None = None
+    ner_cache_enabled: bool = True
+    ner_cache_max_bytes: int = Field(default=134217728, ge=1)
+    ner_cache_ttl_seconds: int = Field(default=86400, ge=1)
     remote_call_timeout: float = Field(default=10, gt=0, le=60)
     remote_max_calls: int = Field(default=2048, ge=1, le=10000)
     remote_max_response_bytes: int = Field(default=2_097_152, ge=1024, le=8_388_608)

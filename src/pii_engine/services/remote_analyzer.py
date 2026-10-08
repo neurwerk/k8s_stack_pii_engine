@@ -6,6 +6,7 @@ import json
 import math
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -204,7 +205,14 @@ def gliner_matches(text: str, model: RemoteModel, transport: RemoteTransport) ->
         offset, chunk = pending.pop()
         analysis_chunks_total.labels(stage="ner").inc()
         try:
-            value = transport.request(model, {"text": chunk})
+            findings = _remote_window(
+                chunk,
+                model,
+                transport,
+                lambda chunk=chunk: _gliner_response(
+                    transport.request(model, {"text": chunk}), chunk, model
+                ),
+            )
         except InputTooLargeError:
             if len(chunk) <= 64:
                 raise RemoteAnalysisError("GLiNER cannot scan bounded input") from None
@@ -218,8 +226,7 @@ def gliner_matches(text: str, model: RemoteModel, transport: RemoteTransport) ->
             )
             continue
         matches.extend(
-            replace(item, start=item.start + offset, end=item.end + offset)
-            for item in _gliner_response(value, chunk, model)
+            replace(item, start=item.start + offset, end=item.end + offset) for item in findings
         )
     return matches
 
@@ -278,12 +285,36 @@ def kserve_matches(
         )
         if len(encoded["input_ids"]) > (limit or 512):
             raise RemoteAnalysisError("KServe input exceeds tokenizer limit")
-        value = transport.request(model, {"instances": [chunk]})
+        findings = _remote_window(
+            chunk,
+            model,
+            transport,
+            lambda chunk=chunk, encoded=encoded: decode_predictions(
+                transport.request(model, {"instances": [chunk]}),
+                chunk,
+                encoded["offset_mapping"],
+                labels,
+                model,
+            ),
+        )
         matches.extend(
-            replace(item, start=item.start + offset, end=item.end + offset)
-            for item in decode_predictions(value, chunk, encoded["offset_mapping"], labels, model)
+            replace(item, start=item.start + offset, end=item.end + offset) for item in findings
         )
     return matches
+
+
+def _remote_window(
+    text: str,
+    model: RemoteModel,
+    transport: RemoteTransport,
+    detect: Callable[[], list[EntityMatch]],
+) -> tuple[EntityMatch, ...]:
+    """Cache validated unfiltered evidence, not remote errors or partial responses."""
+    cache = getattr(transport, "window_cache", None)
+    if cache is None:
+        return tuple(detect())
+    context = getattr(transport, "cache_namespace", b"") + model.model_dump_json().encode()
+    return cache.run(text, context, lambda: tuple(detect()))
 
 
 def _unique(matches: list[EntityMatch]) -> list[EntityMatch]:
