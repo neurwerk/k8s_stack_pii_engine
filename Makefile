@@ -19,4 +19,4 @@ benchmark:
 	uv run --frozen --extra dev python -m benchmarks.run_synthetic
 
 build:
-	docker --context desktop-linux build --build-arg ACCELERATOR=cpu -t pii-engine:local-cpu .
+	docker --context desktop-linux build --platform linux/amd64 -t pii-engine:local .

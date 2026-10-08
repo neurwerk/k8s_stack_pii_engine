@@ -32,7 +32,6 @@ class Settings(BaseSettings):
     queue_wait_timeout: float = Field(default=2.0, gt=0, le=30)
     analysis_timeout: float = Field(default=600.0, gt=0, le=600)
     studio_analysis_timeout: float = Field(default=30.0, gt=0, le=30)
-    device: str = Field(default="cpu", pattern=r"^(?:cpu|cuda(?::\d+)?)$")
     policy_version: str = Field(default="v1", min_length=1, max_length=64)
     policy_config: Path | None = None
     tls_cert: Path | None = None
@@ -83,7 +82,7 @@ class Settings(BaseSettings):
         return self
 
     def _validate_ner_contract(self) -> None:
-        """Reject canonical selection combined with legacy selectors or CUDA."""
+        """Reject canonical selection combined with legacy selectors."""
         legacy = {
             "analyzer_backend",
             "remote_config",
@@ -98,8 +97,6 @@ class Settings(BaseSettings):
         }
         if self.ner_config is not None and legacy.intersection(self.model_fields_set):
             raise ValueError("canonical NER conflicts with explicit legacy runtime settings")
-        if self.ner_config is not None and self.device != "cpu":
-            raise ValueError("canonical NER requires the CPU device")
 
     @property
     def model_bundle_path(self) -> Path | None:

@@ -41,22 +41,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: cpu
-            platforms: linux/amd64
-          - variant: cu124
-            platforms: linux/amd64
     steps:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Free disk space for CUDA image
-        if: matrix.variant == 'cu124'
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-          df -h /
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Log in to GitHub Container Registry
@@ -70,10 +57,9 @@ jobs:
         env:
           IMAGE_REPOSITORY: ghcr.io/neurwerk/k8s-stack-pii-engine
           RELEASE_TAG: ${{ github.ref_name }}
-          VARIANT: ${{ matrix.variant }}
         run: |
           version="${RELEASE_TAG#v}"
-          image_ref="$IMAGE_REPOSITORY:$version-$VARIANT"
+          image_ref="$IMAGE_REPOSITORY:$version"
           manifest_file="$RUNNER_TEMP/version-manifest.json"
           image_file="$RUNNER_TEMP/version-image.json"
           error_file="$RUNNER_TEMP/version-inspect.err"
@@ -107,6 +93,11 @@ jobs:
             exit 1
           fi
           revision="$(jq -er '.config.Labels["org.opencontainers.image.revision"] | select(type == "string")' "$image_file")"
+          image_version="$(jq -er '.config.Labels["org.opencontainers.image.version"] | select(type == "string")' "$image_file")"
+          if [[ "$image_version" != "$version" ]]; then
+            printf '%s\n' "versioned image version $image_version does not match $version" >&2
+            exit 1
+          fi
           if [[ "$revision" != "$GITHUB_SHA" ]]; then
             printf '%s\n' "versioned image revision $revision does not match $GITHUB_SHA" >&2
             exit 1
@@ -120,7 +111,7 @@ jobs:
           images: ghcr.io/neurwerk/k8s-stack-pii-engine
           flavor: latest=false
           tags: |
-            type=semver,pattern={{version}}-${{ matrix.variant }}
+            type=semver,pattern={{version}}
       - name: Build and push image
         id: build
         if: steps.image.outputs.exists == 'false'
@@ -128,12 +119,11 @@ jobs:
         with:
           context: .
           push: true
-          platforms: ${{ matrix.platforms }}
-          build-args: ACCELERATOR=${{ matrix.variant }}
+          platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.variant }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+          cache-from: type=gha,scope=pii-engine
+          cache-to: type=gha,mode=max,scope=pii-engine
 
       - name: Resolve versioned image digest
         id: resolve
@@ -142,7 +132,7 @@ jobs:
           EXISTING_DIGEST: ${{ steps.image.outputs.digest }}
           IMAGE_EXISTS: ${{ steps.image.outputs.exists }}
           IMAGE_REF: ${{ steps.image.outputs.ref }}
-          VARIANT: ${{ matrix.variant }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if [[ "$IMAGE_EXISTS" == "true" ]]; then
             digest="$EXISTING_DIGEST"
@@ -173,6 +163,11 @@ jobs:
               exit 1
             fi
             revision="$(jq -er '.config.Labels["org.opencontainers.image.revision"] | select(type == "string")' "$image_file")"
+            image_version="$(jq -er '.config.Labels["org.opencontainers.image.version"] | select(type == "string")' "$image_file")"
+            if [[ "$image_version" != "${RELEASE_TAG#v}" ]]; then
+              printf '%s\n' "published image version does not match the release tag" >&2
+              exit 1
+            fi
             if [[ "$revision" != "$GITHUB_SHA" ]]; then
               printf '%s\n' "published image revision $revision does not match $GITHUB_SHA" >&2
               exit 1
@@ -183,13 +178,13 @@ jobs:
             exit 1
           fi
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
-          printf '%s\n' "$digest" > "$RUNNER_TEMP/digest-$VARIANT.txt"
+          printf '%s\n' "$digest" > "$RUNNER_TEMP/digest.txt"
 
       - name: Upload published digest
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: pii-engine-${{ matrix.variant }}-digest
-          path: ${{ runner.temp }}/digest-${{ matrix.variant }}.txt
+          name: pii-engine-digest
+          path: ${{ runner.temp }}/digest.txt
           if-no-files-found: error
           overwrite: true
           retention-days: 1
@@ -201,23 +196,20 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download published digests
+      - name: Download published digest
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: pii-engine-*-digest
+          name: pii-engine-digest
           path: ${{ runner.temp }}/digests
-          merge-multiple: true
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          cpu_digest="$(<"$RUNNER_TEMP/digests/digest-cpu.txt")"
-          cuda_digest="$(<"$RUNNER_TEMP/digests/digest-cu124.txt")"
-          if [[ ! "$cpu_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || \
-             [[ ! "$cuda_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            printf '%s\n' "image publication did not return valid digests" >&2
+          digest="$(<"$RUNNER_TEMP/digests/digest.txt")"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            printf '%s\n' "image publication did not return a valid digest" >&2
             exit 1
           fi
           version="${RELEASE_TAG#v}"
@@ -225,11 +217,9 @@ jobs:
             "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
             -f tag_name="$RELEASE_TAG" --jq .body > "$RUNNER_TEMP/generated-notes.md"
           {
-            printf '## Published Images\n\n'
-            printf -- '- `ghcr.io/neurwerk/k8s-stack-pii-engine:%s-cpu@%s`\n' \
-              "$version" "$cpu_digest"
-            printf -- '- `ghcr.io/neurwerk/k8s-stack-pii-engine:%s-cu124@%s`\n\n' \
-              "$version" "$cuda_digest"
+            printf '## Published Image\n\n'
+            printf -- '- `ghcr.io/neurwerk/k8s-stack-pii-engine:%s@%s`\n\n' \
+              "$version" "$digest"
             cat "$RUNNER_TEMP/generated-notes.md"
           } > "$RUNNER_TEMP/release-notes.md"
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then

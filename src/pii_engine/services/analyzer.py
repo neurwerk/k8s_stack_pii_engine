@@ -164,26 +164,11 @@ def create_ner_analyzer(settings: Settings, policy: PolicySettings, mode: Analyz
     return PresidioAnalyzer(settings, policy, ner_only=True)
 
 
-def configure_inference_device(device: str) -> str:
-    """Select CPU or require one explicit CUDA device before loading models."""
+def configure_cpu_inference() -> None:
+    """Explicitly select CPU before loading local models."""
     import spacy
-    import torch
-    from thinc.api import get_torch_default_device
 
-    if device == "cpu":
-        spacy.require_cpu()
-        return "cpu"
-    index = int(device.split(":", maxsplit=1)[1]) if ":" in device else 0
-    if not torch.cuda.is_available() or index >= torch.cuda.device_count():
-        raise ValueError("configured CUDA device is unavailable")
-    try:
-        spacy.require_gpu(index)
-    except (ImportError, RuntimeError, ValueError) as exc:
-        raise ValueError("configured CUDA device cannot be activated") from exc
-    selected = get_torch_default_device()
-    if selected.type != "cuda" or selected.index != index:
-        raise ValueError("transformer pipeline did not select the configured CUDA device")
-    return f"cuda:{index}"
+    spacy.require_cpu()
 
 
 class PresidioAnalyzer:
