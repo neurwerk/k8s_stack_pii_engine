@@ -43,3 +43,5 @@ actions_total = Counter("pii_engine_actions_total", "Applied entity actions", ["
 session_cache_total = Counter(
     "pii_engine_session_cache_total", "Session cache operations", ["operation", "outcome"]
 )
+ner_cache_events_total = Counter("pii_engine_ner_cache_events_total", "NER cache events", ["event"])
+ner_cache_bytes = Gauge("pii_engine_ner_cache_bytes", "NER cache accounted retained bytes")

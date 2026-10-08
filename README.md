@@ -118,3 +118,39 @@ release supporting it; existing 0.12.0 images do not support this configuration.
 
 Operational metrics include detector durations (`rules`, `ner`, `wait`) and
 chunk counts, with no text, endpoints or model identities as metric labels.
+
+### Process-only NER window cache
+
+Local spaCy/transformer and remote GLiNER/KServe NER reuse successful findings for
+exact, unchanged model windows, including their overlap/context. Independent text
+leaves and existing window recipes are unchanged. CPU rules, request/model
+validation, current policy filtering, and anonymization still run normally.
+Empty successful findings are reusable; errors and incomplete windows are not.
+Adaptive GLiNER size rejection still subdivides with complete coverage.
+
+Defaults are `PII_ENGINE_NER_CACHE_ENABLED=true`,
+`PII_ENGINE_NER_CACHE_MAX_BYTES=134217728` (128 MiB), and
+`PII_ENGINE_NER_CACHE_TTL_SECONDS=86400` (24 hours). This is one budget shared by
+all selected languages/models in the runtime, not one budget per backend.
+LRU eviction may remove findings earlier; hits never extend the creation-based
+lifetime. Runtime startup/shutdown manages approximately 60-second idle expiry
+cleanup. Disabling the cache restores ordinary detection.
+
+Only immutable normalized relative spans (entity, score, provenance) and
+process-random HMAC digests are retained, never input text, NLP artifacts,
+mutable Presidio results, reversal mappings, or exceptions. A fresh namespace
+identifies each immutable loaded inference configuration; language and local
+inference threshold distinguish local keys, and remote model configuration
+distinguishes remote keys. Remote findings are cached before policy filtering,
+so Studio threshold/entity/action changes use current policy. Current offsets,
+ownership and overlap merging are reapplied without mutating cached findings.
+Accesses are thread-safe without locking inference; concurrent misses may repeat
+inference. Cache failures fall back to detection and oversized entries are skipped.
+
+The accounted-memory bound sums Python sizes of the findings tuple, each span,
+its attribute dictionary and values, plus 1 KiB per entry for the digest/key and
+cache bookkeeping. It is **not an exact process RSS limit**: allow additional
+headroom for Python allocator/container slack, model memory, temporary inputs,
+in-flight results and concurrent inference. Content-free cache event counters
+(`hit`, `miss`, `eviction`, `expiry`, `error`) and accounted-byte gauge are exposed
+as `pii_engine_ner_cache_events_total` and `pii_engine_ner_cache_bytes`.

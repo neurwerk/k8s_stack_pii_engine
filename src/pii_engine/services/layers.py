@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import secrets
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from pii_engine.config.ner import NerConfig, load_ner
 from pii_engine.metrics import analysis_chunks_total, analysis_stage_duration_seconds
@@ -39,6 +40,18 @@ class LayeredAnalyzer:
             )
             ner_policy = policy.model_copy(update={"pii": pii})
         self.ner = None if mode == "disabled" else create_ner_analyzer(settings, ner_policy, mode)
+        from pii_engine.services.ner_cache import NerWindowCache
+
+        self.window_cache = (
+            NerWindowCache(settings.ner_cache_max_bytes, settings.ner_cache_ttl_seconds)
+            if settings.ner_cache_enabled and self.ner is not None
+            else None
+        )
+        if self.window_cache is not None:
+            # A fresh namespace identifies this immutable loaded inference configuration.
+            target = cast("Any", getattr(self.ner, "transport", self.ner))
+            target.window_cache = self.window_cache
+            target.cache_namespace = secrets.token_bytes(32)
         self.validate_policy(policy)
 
     def validate_policy(self, policy: PolicySettings) -> None:
@@ -90,6 +103,13 @@ class LayeredAnalyzer:
 
     def close(self) -> None:
         """Close a selected remote transport."""
+        if self.window_cache is not None:
+            self.window_cache.close()
         close = getattr(self.ner, "close", None)
         if close is not None:
             close()
+
+    def start(self) -> None:
+        """Start idle cache expiry with the process runtime."""
+        if self.window_cache is not None:
+            self.window_cache.start()
