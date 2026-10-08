@@ -62,6 +62,60 @@ def test_canonical_settings_reject_explicit_legacy_defaults(tmp_path):
         Settings(ner_config=tmp_path / "ner.yaml", analyzer_backend="local")
 
 
+def local_config(**model_fields):
+    return {
+        "mode": "local",
+        "languageModels": {"en": "english"},
+        "models": {"english": {"profile": "spacy-en-sm-v1", **model_fields}},
+    }
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("endpoint", None),
+        ("endpoint", ""),
+        ("endpoint", "https://ner.example.com/extract"),
+        ("modelName", "ner-multilingual"),
+        ("modelName", ""),
+        ("modelName", None),
+        ("inferenceThreshold", None),
+        ("inferenceThreshold", 0),
+        ("inferenceThreshold", 0.45),
+        ("allowPrivateHttp", False),
+        ("allowPrivateHttp", True),
+        ("allowPrivateHttp", None),
+        ("apiKeyFile", None),
+        ("apiKeyFile", ""),
+        ("tokenizerPath", None),
+        ("tokenizerPath", ""),
+        ("model_name", "ner-multilingual"),
+        ("allow_private_http", False),
+    ],
+)
+def test_local_rejects_explicit_remote_fields_even_when_inert(field, value):
+    with pytest.raises(ValueError):
+        NerConfig.model_validate(local_config(**{field: value}))
+
+
+@pytest.mark.parametrize("capacity", [{}, {"maxCalls": 2048}])
+def test_local_rejects_explicit_remote_capacity(capacity):
+    with pytest.raises(ValueError, match="remote capacity"):
+        NerConfig.model_validate(local_config() | {"capacity": capacity})
+
+
+def test_local_accepts_omitted_remote_fields_and_pinned_identity():
+    config = NerConfig.model_validate(
+        local_config(
+            upstream="en_core_web_sm",
+            revision="3.8.0",
+        )
+    )
+    assert config.mode == "local"
+    assert config.models["english"].upstream == "en_core_web_sm"
+    assert config.models["english"].revision == "3.8.0"
+
+
 def test_existing_adapter_profiles_can_be_added_as_data(monkeypatch):
     profile = ModelProfile(
         kind="kserve",

@@ -204,12 +204,19 @@ class NerConfig(BaseModel):
             )
         return self
 
-    @staticmethod
-    def _validate_local(model: NerModel, profile: ModelProfile) -> None:
+    def _validate_local(self, model: NerModel, profile: ModelProfile) -> None:
         """Keep local resources and immutable identities unambiguous."""
-        if any((model.endpoint, model.api_key_file, model.tokenizer_path)) or (
-            model.inference_threshold is not None or model.allow_private_http
-        ):
+        if "capacity" in self.model_fields_set:
+            raise ValueError("local NER cannot configure remote capacity")
+        remote_fields = {
+            "endpoint",
+            "model_name",
+            "inference_threshold",
+            "allow_private_http",
+            "api_key_file",
+            "tokenizer_path",
+        }
+        if remote_fields.intersection(model.model_fields_set):
             raise ValueError("local NER cannot configure remote resources")
         if (model.upstream or profile.upstream) != profile.upstream or (
             model.revision or profile.revision
