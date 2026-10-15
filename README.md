@@ -51,6 +51,19 @@ inference`; the release image includes the locked inference dependencies and
 offline English, German and Dutch spaCy models. `make build` builds a local
 image without publishing it.
 
+## Request capacity
+
+`PII_ENGINE_MAX_TEXT_LEAVES` is a positive integer, defaulting to `2000`. It bounds
+the total independently inspected text pieces across a request, including history
+and tool text, before cache lookup or analysis. Base exposes the same setting as
+`monitorPiiEngine.capacity.maxTextLeaves`. Raising it needs a configuration rollout,
+not a new image. Byte, aggregate-character, nesting and analysis-time limits still
+apply; cache misses and rule scans must fit the analysis budget.
+
+Use compatible adapter and Studio releases that accept the configured leaf count.
+The shared request package no longer imposes a separate 256-entry history limit;
+protocol-specific tool and content-part limits still apply.
+
 ## Independent rules and NER configuration
 
 Production analysis runs CPU rules/checksums/custom recognizers over each original

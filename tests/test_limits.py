@@ -49,7 +49,7 @@ def test_limit_settings_have_exact_defaults_and_hard_maximums() -> None:
     assert settings.max_adapter_response_bytes == MAX_ADAPTER_RESPONSE_BYTES
     assert settings.max_studio_evaluation_response_bytes == MAX_STUDIO_EVALUATION_RESPONSE_BYTES
     assert settings.max_text_characters == MAX_TEXT_CHARACTERS
-    assert settings.max_text_leaves == 256
+    assert settings.max_text_leaves == 2_000
     assert settings.analysis_timeout == 600
     assert settings.studio_analysis_timeout == 30
     assert make_test_policy().pii.timeout == 600
@@ -68,12 +68,13 @@ def test_limit_settings_have_exact_defaults_and_hard_maximums() -> None:
         == 1_024
     )
     assert Settings(allow_test_analyzer=True, max_text_characters=1).max_text_characters == 1
+    assert Settings(allow_test_analyzer=True, max_text_leaves=3_000).max_text_leaves == 3_000
     for values in (
         {"max_request_bytes": MAX_REQUEST_BYTES + 1},
         {"max_adapter_response_bytes": MAX_ADAPTER_RESPONSE_BYTES + 1},
         {"max_studio_evaluation_response_bytes": MAX_STUDIO_EVALUATION_RESPONSE_BYTES + 1},
         {"max_text_characters": MAX_TEXT_CHARACTERS + 1},
-        {"max_text_leaves": 257},
+        {"max_text_leaves": 0},
         {"analysis_timeout": 601},
         {"studio_analysis_timeout": 31},
     ):

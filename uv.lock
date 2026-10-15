@@ -559,7 +559,7 @@ wheels = [
 
 [[package]]
 name = "neurwerk-pii-engine"
-version = "0.14.1"
+version = "0.15.0"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
@@ -629,7 +629,7 @@ provides-extras = ["inference", "dev"]
 
 [[package]]
 name = "neurwerk-request-segments"
-version = "0.1.0"
+version = "0.1.1"
 source = { directory = "vendor/request_segments" }
 dependencies = [
     { name = "pydantic" },

@@ -250,7 +250,7 @@ class AnalysisMetadata(StrictModel):
     overlap_count: int = Field(ge=0, le=10_000_000)
     overlap_resolution: Literal["strictest_action"]
     policy_version: str = Field(min_length=1, max_length=64)
-    text_leaf_count: int = Field(ge=0, le=256)
+    text_leaf_count: int = Field(ge=0)
     cached_decision_applied: bool
 
     @model_validator(mode="after")
@@ -552,7 +552,7 @@ class SegmentAnalysisResponse(StrictModel):
             raise ValueError("reroute requires a route")
         if self.segments is not None:
             ids = [segment.id for segment in self.segments]
-            if len(ids) != len(set(ids)) or len(ids) > 256:
+            if len(ids) != len(set(ids)):
                 raise ValueError("invalid result segment IDs")
         return self
 

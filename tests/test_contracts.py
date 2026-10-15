@@ -718,15 +718,15 @@ async def test_responses_text_format_contract_rejects_unknown_control_fields(
 
 
 async def test_bounds_reject_large_message_list(client: httpx.AsyncClient) -> None:
-    """Pydantic bounds reject oversized message collections."""
+    """The configured semantic limit rejects oversized message histories."""
     payload = {
         "request": {
             "model": "test",
-            "messages": [{"role": "user", "content": "x"}] * 257,
+            "messages": [{"role": "user", "content": "x"}] * 2_001,
         }
     }
     response = await client.post("/v1/studio/analyze-request", json=payload)
-    assert response.status_code == 400
+    assert response.status_code == 413
 
 
 async def test_chunked_body_limit_stops_streaming_allocation(client: httpx.AsyncClient) -> None:
