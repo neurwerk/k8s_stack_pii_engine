@@ -11,6 +11,16 @@ from pii_engine.metrics import session_cache_total
 from pii_engine.models.contracts import PIIReportRow
 
 type RequestKind = Literal["model", "mcp"]
+type Digest = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
+
+
+class ReasoningReceipts(BaseModel):
+    """Only scoped fingerprints cross the continuation-provenance endpoint."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    scope: Digest
+    digests: list[Digest] = Field(min_length=1, max_length=256)
+    policy_version: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class SessionDecision(BaseModel):
@@ -97,6 +107,7 @@ class SessionStore:
         self._url = url
         self._ttl_seconds = ttl_seconds
         self._prefix = f"pii-engine:v2:{policy_scope}:session:"
+        self._reasoning_prefix = f"pii-engine:v1:{policy_scope}:reasoning:"
         self._client: Any = None
 
     async def start(self) -> None:
@@ -151,3 +162,23 @@ class SessionStore:
     def _require_client(self) -> None:
         if self._client is None:
             raise RuntimeError("required session cache is unavailable")
+
+    async def record_reasoning(self, receipts: ReasoningReceipts) -> None:
+        """Record evidence with the session lifetime, never the provider's content."""
+        self._require_client()
+        async with self._client.pipeline(transaction=True) as pipeline:
+            for digest in set(receipts.digests):
+                pipeline.set(
+                    f"{self._reasoning_prefix}{receipts.scope}:{digest}",
+                    "1",
+                    ex=self._ttl_seconds,
+                )
+            await pipeline.execute()
+
+    async def verify_reasoning(self, receipts: ReasoningReceipts) -> bool:
+        """Reads do not extend expiry; missing, evicted and foreign evidence fails closed."""
+        self._require_client()
+        values = await self._client.mget(
+            [f"{self._reasoning_prefix}{receipts.scope}:{digest}" for digest in receipts.digests]
+        )
+        return len(values) == len(receipts.digests) and all(value == "1" for value in values)
