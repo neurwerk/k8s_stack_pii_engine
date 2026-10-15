@@ -168,18 +168,38 @@ async def test_visual_only_analysis_preserves_text_and_blocks_failed_inspection(
     assert response.json()["reversal"] == {}
 
 
-async def test_segment_count_limit_reports_the_actual_count(client: httpx.AsyncClient) -> None:
+@pytest.mark.parametrize("maximum", [2_000, 2_100])
+async def test_configured_segment_limit_accepts_and_scans_every_leaf(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, maximum: int
+) -> None:
+    monkeypatch.setattr(get_runtime().settings, "max_text_leaves", maximum)
+    request = _request(*(["text"] * (maximum - 1)), "a@example.com")
+    response = await client.post("/v2/adapter/analyze-segments", json=request)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["analysis"]["text_leaf_count"] == maximum
+    assert len(body["segments"]) == maximum
+    assert body["segments"][-1]["id"] == f"s{maximum - 1}"
+    assert body["segments"][-1]["text"] != "a@example.com"
+    assert body["entity_counts"]["EMAIL_ADDRESS"] == 1
+
+
+@pytest.mark.parametrize("maximum", [2_000, 2_100])
+async def test_segment_count_limit_reports_the_actual_count(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, maximum: int
+) -> None:
+    monkeypatch.setattr(get_runtime().settings, "max_text_leaves", maximum)
     response = await client.post(
         "/v2/adapter/analyze-segments",
-        json=_request(*(["text"] * 257)),
+        json=_request(*(["text"] * (maximum + 1))),
     )
     assert response.status_code == 413, response.text
     assert response.json()["error"]["limit"] == {
         "component": "pii_engine",
         "stage": "inspection",
         "reason": "segments",
-        "measured": 257,
-        "maximum": 256,
+        "measured": maximum + 1,
+        "maximum": maximum,
         "unit": "items",
         "exact": True,
     }
