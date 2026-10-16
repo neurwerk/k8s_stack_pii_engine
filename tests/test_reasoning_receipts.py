@@ -98,7 +98,7 @@ async def test_receipt_endpoint_requires_adapter_identity_and_only_accepts_diges
     for invalid in (
         {**BODY, "digests": [sentinel]},
         {**BODY, "text": sentinel},
-        {**BODY, "digests": ["b" * 64] * 257},
+        {**BODY, "digests": ["b" * 64] * 4097},
     ):
         response = await client.request(method, PATH, json=invalid)
         assert response.status_code == 400
@@ -110,3 +110,16 @@ async def test_receipt_endpoint_requires_adapter_identity_and_only_accepts_diges
     )
     assert response.status_code == 403
     assert not cache.values
+
+
+async def test_long_history_receipts_boundary(client):
+    cache = ReceiptCache()
+    replica(cache)
+    body = {**BODY, "digests": [f"{index:064x}" for index in range(4096)]}
+    assert (await client.put(PATH, json=body)).status_code == 204
+    assert (await client.post(PATH, json=body)).status_code == 204
+    before = dict(cache.values)
+    oversized = {**body, "digests": [*body["digests"], "f" * 64]}
+    for method in ("PUT", "POST"):
+        assert (await client.request(method, PATH, json=oversized)).status_code == 400
+        assert cache.values == before

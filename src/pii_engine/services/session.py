@@ -19,7 +19,7 @@ class ReasoningReceipts(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
     scope: Digest
-    digests: list[Digest] = Field(min_length=1, max_length=256)
+    digests: list[Digest] = Field(min_length=1, max_length=4096)
     policy_version: str | None = Field(default=None, min_length=1, max_length=64)
 
 
