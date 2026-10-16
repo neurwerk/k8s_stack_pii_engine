@@ -629,7 +629,7 @@ provides-extras = ["inference", "dev"]
 
 [[package]]
 name = "neurwerk-request-segments"
-version = "0.1.2"
+version = "0.1.3"
 source = { directory = "vendor/request_segments" }
 dependencies = [
     { name = "pydantic" },
