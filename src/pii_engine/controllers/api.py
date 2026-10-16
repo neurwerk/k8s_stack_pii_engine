@@ -6,9 +6,10 @@ import logging
 import re
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticSerializationError
+from redis.exceptions import RedisError
 
 from pii_engine.config.policy import PolicyOverride
 from pii_engine.config.settings import Settings, get_settings
@@ -61,6 +62,7 @@ from pii_engine.runtime import RuntimeNotReadyError, get_runtime
 from pii_engine.services.errors import AnalysisRequestTooLargeError, InvalidAnalysisRequestError
 from pii_engine.services.limiter import AnalysisCapacityError
 from pii_engine.services.policy import PolicyResult
+from pii_engine.services.session import ReasoningReceipts
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -548,6 +550,38 @@ async def analyze_adapter_segments(
         )
     except Exception as exc:  # noqa: BLE001 - safe fail-closed transport boundary.
         code = _failure_code(exc)
+        log_analysis_failure(caller, code, exc, debug_details=False)
+        raise _measured_api_error(code, exc) from None
+
+
+@router.put(
+    "/v2/adapter/reasoning-receipts", status_code=204, operation_id="record_reasoning_receipts"
+)
+@router.post(
+    "/v2/adapter/reasoning-receipts", status_code=204, operation_id="verify_reasoning_receipts"
+)
+async def reasoning_receipts(
+    body: ReasoningReceipts,
+    request: Request,
+    caller: Caller = Depends(adapter_identity),
+) -> Response:
+    """Record completed gateway responses or verify immutable replay, using only digests."""
+    runtime = get_runtime()
+    if runtime.session is None or body.policy_version not in {
+        None,
+        runtime.settings.policy_version,
+    }:
+        raise analysis_api_error("runtime_unavailable")
+    try:
+        if request.method == "PUT":
+            await runtime.session.record_reasoning(body)
+        elif not await runtime.session.verify_reasoning(body):
+            return Response(status_code=403)
+        return Response(status_code=204)
+    except Exception as exc:  # noqa: BLE001 - content-free workload boundary.
+        code = (
+            "runtime_unavailable" if isinstance(exc, (OSError, RedisError)) else _failure_code(exc)
+        )
         log_analysis_failure(caller, code, exc, debug_details=False)
         raise _measured_api_error(code, exc) from None
 
