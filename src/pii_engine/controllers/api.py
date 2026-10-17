@@ -567,6 +567,18 @@ async def reasoning_receipts(
 ) -> Response:
     """Record completed gateway responses or verify immutable replay, using only digests."""
     runtime = get_runtime()
+    if len(body.digests) > runtime.settings.max_reasoning_fingerprints:
+        raise analysis_api_error(
+            "request_too_large",
+            limit=LimitDetail(
+                stage="admission",
+                reason="reasoning_fingerprints",
+                measured=len(body.digests),
+                maximum=runtime.settings.max_reasoning_fingerprints,
+                unit="items",
+                exact=True,
+            ),
+        )
     if runtime.session is None or body.policy_version not in {
         None,
         runtime.settings.policy_version,
