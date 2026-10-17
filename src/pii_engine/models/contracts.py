@@ -98,6 +98,7 @@ class LimitDetail(BaseModel):
         "segments",
         "text_leaves",
         "empty_chunks",
+        "reasoning_fingerprints",
     ]
     measured: int = Field(ge=0)
     maximum: int = Field(ge=0)

@@ -44,8 +44,8 @@ class ReceiptCache:
         ]
 
 
-def replica(cache, policy="policy-1"):
-    runtime = EngineRuntime(Settings(allow_test_analyzer=True, policy_version=policy))
+def replica(cache, policy="policy-1", **settings):
+    runtime = EngineRuntime(Settings(allow_test_analyzer=True, policy_version=policy, **settings))
     runtime.session = SessionStore("redis://unused", 60, policy)
     runtime.session._client = cache
     set_runtime(runtime)
@@ -98,7 +98,6 @@ async def test_receipt_endpoint_requires_adapter_identity_and_only_accepts_diges
     for invalid in (
         {**BODY, "digests": [sentinel]},
         {**BODY, "text": sentinel},
-        {**BODY, "digests": ["b" * 64] * 4097},
     ):
         response = await client.request(method, PATH, json=invalid)
         assert response.status_code == 400
@@ -112,14 +111,39 @@ async def test_receipt_endpoint_requires_adapter_identity_and_only_accepts_diges
     assert not cache.values
 
 
-async def test_long_history_receipts_boundary(client):
+@pytest.mark.parametrize("configured_limit", [None, 2, 8192])
+async def test_long_history_receipts_boundary(client, configured_limit):
     cache = ReceiptCache()
-    replica(cache)
-    body = {**BODY, "digests": [f"{index:064x}" for index in range(4096)]}
+    runtime = replica(
+        cache,
+        **({} if configured_limit is None else {"max_reasoning_fingerprints": configured_limit}),
+    )
+    maximum = runtime.settings.max_reasoning_fingerprints
+    body = {**BODY, "digests": [f"{index:064x}" for index in range(maximum)]}
     assert (await client.put(PATH, json=body)).status_code == 204
     assert (await client.post(PATH, json=body)).status_code == 204
     before = dict(cache.values)
+    runtime.session.record_reasoning = AsyncMock()
+    runtime.session.verify_reasoning = AsyncMock()
     oversized = {**body, "digests": [*body["digests"], "f" * 64]}
     for method in ("PUT", "POST"):
-        assert (await client.request(method, PATH, json=oversized)).status_code == 400
+        for invalid in (oversized, {**body, "digests": ["a" * 64] * (maximum + 1)}):
+            response = await client.request(method, PATH, json=invalid)
+            assert response.status_code == 413
+            limit = response.json()["error"]["limit"]
+            assert limit["reason"] == "reasoning_fingerprints"
+            assert limit["maximum"] == maximum
+            assert limit["measured"] == maximum + 1
         assert cache.values == before
+    runtime.session.record_reasoning.assert_not_called()
+    runtime.session.verify_reasoning.assert_not_called()
+
+
+def test_reasoning_limit_environment(monkeypatch):
+    assert Settings(allow_test_analyzer=True).max_reasoning_fingerprints == 4096
+    monkeypatch.setenv("PII_ENGINE_MAX_REASONING_FINGERPRINTS", "8192")
+    assert Settings(allow_test_analyzer=True).max_reasoning_fingerprints == 8192
+    for invalid in ("0", "-1", "1.5", "invalid"):
+        monkeypatch.setenv("PII_ENGINE_MAX_REASONING_FINGERPRINTS", invalid)
+        with pytest.raises(ValueError):
+            Settings(allow_test_analyzer=True)

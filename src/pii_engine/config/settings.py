@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     max_adapter_response_bytes: int = Field(default=10_485_760, ge=1_024, le=10_485_760)
     max_studio_evaluation_response_bytes: int = Field(default=10_485_760, ge=1_024, le=10_485_760)
     max_text_leaves: int = Field(default=2_000, ge=1)
+    max_reasoning_fingerprints: int = Field(default=4096, ge=1)
     max_text_characters: int = Field(default=4_000_000, ge=1, le=4_000_000)
     max_nesting_depth: int = Field(default=32, ge=1, le=128)
     max_concurrent_analyses: int = Field(default=4, ge=1, le=128)
