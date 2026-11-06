@@ -17,7 +17,7 @@ from bisect import bisect_left
 from typing import TYPE_CHECKING, Any
 
 from pii_engine.lib.catalog import ENTITY_CATALOG
-from pii_engine.services.analyzer import EntityMatch
+from pii_engine.services.analyzer import EntityMatch, _selected_entities, validate_policy_selection
 from pii_engine.services.recognizers import custom_recognizers, normalized_recognizers
 
 if TYPE_CHECKING:
@@ -201,9 +201,7 @@ class RulesAnalyzer:
             active.pii.analyzer_languages
         ).issubset(self.policy.pii.supported_languages):
             raise ValueError("request policy changes loaded rule configuration")
-        selected = set(active.pii.analyzer_entities or ENTITY_CATALOG)
-        if not active.pii.analyzer_entities:
-            selected.update(definition.entity for definition in active.pii.custom_recognizers)
+        selected = _selected_entities(active)
         rules = [
             *self._rules,
             *(
@@ -255,9 +253,7 @@ class RulesAnalyzer:
 
     @staticmethod
     def _validate_policy(policy: PolicySettings) -> None:
-        custom = {definition.entity for definition in policy.pii.custom_recognizers}
-        if set(policy.pii.analyzer_entities) - set(ENTITY_CATALOG) - custom:
-            raise ValueError("policy selects an unknown entity")
+        validate_policy_selection(policy)
         if not set(policy.pii.supported_languages).issubset({"en", "de", "nl"}):
             raise ValueError("configured language has no rule context support")
 

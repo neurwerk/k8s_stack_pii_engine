@@ -19,6 +19,8 @@ from pii_engine.services.recognizers import (
 )
 
 if TYPE_CHECKING:
+    from presidio_analyzer import RecognizerResult
+
     from pii_engine.config.ner import ModelProfile
     from pii_engine.config.policy import PolicySettings
     from pii_engine.config.settings import Settings
@@ -195,7 +197,7 @@ class PresidioAnalyzer:
 
     def analyze(self, text: str, policy: PolicySettings | None = None) -> list[EntityMatch]:
         """Analyze all configured languages and use Presidio duplicate handling."""
-        from presidio_analyzer import EntityRecognizer, RecognizerResult
+        from presidio_analyzer import EntityRecognizer
 
         active = policy or self.policy
         aliases = self._selected_aliases(active, tuple(active.pii.analyzer_languages))
@@ -219,22 +221,7 @@ class PresidioAnalyzer:
                     result.start += offset
                     result.end += offset
                     results.append(result)
-        deduplicated: list[RecognizerResult] = EntityRecognizer.remove_duplicates(results)
-        selected = _selected_entities(active)
-        matches = [
-            EntityMatch(
-                result.entity_type,
-                result.start,
-                result.end,
-                float(result.score),
-                _recognizer_source(result),
-            )
-            for result in sorted(
-                deduplicated, key=lambda item: (item.start, item.end, item.entity_type)
-            )
-            if result.entity_type in selected
-        ]
-        return _deduplicate_matches(matches)
+        return _convert_results(EntityRecognizer.remove_duplicates(results), active)
 
     def _validate_selection(self) -> None:
         """Reject unknown entities, aliases, paths, and language mismatches."""
@@ -351,7 +338,7 @@ class PresidioSpacyAnalyzer:
 
     def analyze(self, text: str, policy: PolicySettings | None = None) -> list[EntityMatch]:
         """Analyze configured languages with baseline NER and Presidio recognizers."""
-        from presidio_analyzer import EntityRecognizer, RecognizerResult
+        from presidio_analyzer import EntityRecognizer
 
         active = policy or self.policy
         results: list[Any] = []
@@ -375,22 +362,7 @@ class PresidioSpacyAnalyzer:
                     midpoint = (result.start + result.end) // 2
                     if owned_start <= midpoint < owned_end:
                         results.append(result)
-        deduplicated: list[RecognizerResult] = EntityRecognizer.remove_duplicates(results)
-        selected = _selected_entities(active)
-        matches = [
-            EntityMatch(
-                result.entity_type,
-                result.start,
-                result.end,
-                float(result.score),
-                _recognizer_source(result),
-            )
-            for result in sorted(
-                deduplicated, key=lambda item: (item.start, item.end, item.entity_type)
-            )
-            if result.entity_type in selected
-        ]
-        return _deduplicate_matches(matches)
+        return _convert_results(EntityRecognizer.remove_duplicates(results), active)
 
     def _create_engine(self) -> Any:  # noqa: ANN401
         """Construct and eagerly initialize Presidio's spaCy NLP engine."""
@@ -434,6 +406,27 @@ class PresidioSpacyAnalyzer:
         for recognizer in recognizers:
             engine.registry.add_recognizer(recognizer)
         return engine
+
+
+def _convert_results(
+    deduplicated: list[RecognizerResult], policy: PolicySettings
+) -> list[EntityMatch]:
+    """Filter and convert deduplicated Presidio findings in stable span order."""
+    selected = _selected_entities(policy)
+    matches = [
+        EntityMatch(
+            result.entity_type,
+            result.start,
+            result.end,
+            float(result.score),
+            _recognizer_source(result),
+        )
+        for result in sorted(
+            deduplicated, key=lambda item: (item.start, item.end, item.entity_type)
+        )
+        if result.entity_type in selected
+    ]
+    return _deduplicate_matches(matches)
 
 
 def validate_policy_selection(policy: PolicySettings) -> None:
