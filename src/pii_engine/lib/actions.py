@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Literal
 
 from pii_engine.models.contracts import ActionDescription, ActionParam
 
@@ -15,7 +15,7 @@ class ActionSpec:
     name: str
     decision: str
     reversible: bool
-    severity: str
+    severity: Literal["pass", "info", "warn", "fail"]
     strictness: int
     notes: str
     params: tuple[ActionParam, ...] = ()
@@ -109,7 +109,7 @@ def action_descriptions() -> list[ActionDescription]:
             name=item.name,
             decision=item.decision,
             reversible=item.reversible,
-            severity=cast(Literal["pass", "info", "warn", "fail"], item.severity),
+            severity=item.severity,
             strictness=item.strictness,
             params=list(item.params),
             notes=item.notes,
