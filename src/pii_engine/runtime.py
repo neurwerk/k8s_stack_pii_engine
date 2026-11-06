@@ -131,7 +131,6 @@ class EngineRuntime:
             self.analyzer_mode = resolve_analyzer_mode(settings)
         except ValueError as exc:
             raise RuntimeNotReadyError("analyzer selection failed") from exc
-        self._static_ready = True
         if not settings.allow_test_analyzer:
             configure_cpu_inference()
         self.device = "cpu"
@@ -193,7 +192,7 @@ class EngineRuntime:
 
     async def ready(self) -> bool:
         """Return current model, policy, key, and Valkey readiness."""
-        if not self._static_ready or not self._cache_still_available():
+        if not self._cache_still_available():
             return False
         healthy_analyzer = getattr(self._analyzer, "healthy", None)
         if healthy_analyzer is not None and not await asyncio.to_thread(healthy_analyzer):
@@ -322,11 +321,9 @@ class EngineRuntime:
             policy_failures_total.labels(caller=caller, error="timeout").inc()
             raise
         except asyncio.CancelledError:
-            if analysis_started.is_set():
-                self._retain_background_analysis(task)
-            else:
+            if not analysis_started.is_set():
                 task.cancel()
-                self._retain_background_analysis(task)
+            self._retain_background_analysis(task)
             raise
         except Exception:
             policy_failures_total.labels(caller=caller, error="analysis").inc()
@@ -637,25 +634,20 @@ class EngineRuntime:
             return cls._result_from_cache(request, cached)
         return None
 
-    @classmethod
-    def _apply_cached_decision(cls, result: PolicyResult, cached: SessionDecision | None) -> None:
+    @staticmethod
+    def _apply_cached_decision(result: PolicyResult, cached: SessionDecision | None) -> None:
         """Apply sticky routing after current-request masking has completed."""
         if cached is not None and cached.decision == "reroute" and result.decision != "block":
-            cls._enforce_cached_reroute(result, cached)
-
-    @staticmethod
-    def _enforce_cached_reroute(result: PolicyResult, cached: SessionDecision) -> None:
-        """Keep a masked reroute sticky after reprocessing the current request."""
-        result.decision = "reroute"
-        result.remote_allowed = False
-        result.route_class = cached.route_class
-        result.entities = sorted(set(result.entities) | set(cached.entities))
-        for entity, count in cached.entity_counts.items():
-            result.entity_counts[entity] = max(result.entity_counts.get(entity, 0), count)
-        result.applied_actions = sorted(set(result.applied_actions) | {"reroute"})
-        result.request_notices = cached.request_notices
-        result.response_notices = cached.response_notices
-        result.cached_decision_applied = True
+            result.decision = "reroute"
+            result.remote_allowed = False
+            result.route_class = cached.route_class
+            result.entities = sorted(set(result.entities) | set(cached.entities))
+            for entity, count in cached.entity_counts.items():
+                result.entity_counts[entity] = max(result.entity_counts.get(entity, 0), count)
+            result.applied_actions = sorted(set(result.applied_actions) | {"reroute"})
+            result.request_notices = cached.request_notices
+            result.response_notices = cached.response_notices
+            result.cached_decision_applied = True
 
     async def _taint_session(
         self,

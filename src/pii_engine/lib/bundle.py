@@ -217,15 +217,8 @@ def desired_reference_matches(
     expected_version: str,
 ) -> bool:
     """Validate the bounded desired reference without rehashing the selected bundle."""
-    try:
-        _validate_reference_path(cache_path, reference_path)
-        if reference_path.is_symlink() or not reference_path.is_file():
-            return False
-        data = reference_path.read_bytes()
-        if len(data) > 4_096:
-            return False
-        reference = DesiredBundleReference.model_validate_json(data)
-    except (OSError, UnicodeError, ValueError):
+    reference = _read_desired_reference(cache_path, reference_path)
+    if reference is None:
         return False
     return (
         reference.bundle_version == expected_version
@@ -240,15 +233,8 @@ def desired_reference_selects_other_complete_cache(
     expected_version: str,
 ) -> bool:
     """Return true only for a valid previous selection during a pin transition."""
-    try:
-        _validate_reference_path(cache_path, reference_path)
-        if reference_path.is_symlink() or not reference_path.is_file():
-            return False
-        data = reference_path.read_bytes()
-        if len(data) > 4_096:
-            return False
-        reference = DesiredBundleReference.model_validate_json(data)
-    except (OSError, UnicodeError, ValueError):
+    reference = _read_desired_reference(cache_path, reference_path)
+    if reference is None:
         return False
     if (
         reference.bundle_version == expected_version
@@ -258,6 +244,22 @@ def desired_reference_selects_other_complete_cache(
     return (
         completed_cache(cache_path, reference.manifest_sha256, reference.bundle_version) is not None
     )
+
+
+def _read_desired_reference(
+    cache_path: Path, reference_path: Path
+) -> DesiredBundleReference | None:
+    """Read a bounded desired reference only from a safe cache path."""
+    try:
+        _validate_reference_path(cache_path, reference_path)
+        if reference_path.is_symlink() or not reference_path.is_file():
+            return None
+        data = reference_path.read_bytes()
+        if len(data) > 4_096:
+            return None
+        return DesiredBundleReference.model_validate_json(data)
+    except (OSError, UnicodeError, ValueError):
+        return None
 
 
 def desired_reference_absent(reference_path: Path) -> bool:
