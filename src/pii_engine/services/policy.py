@@ -143,6 +143,7 @@ class PolicyService:
         """Run safety and global policy decisions over independent caller segments."""
         leaves = [TextLeaf((segment.id,), segment.text) for segment in request.segments]
         result = self._preflight(request, leaves)
+        source_rows, source_routes = self._source_restrictions(request)
         face_route = None
         if request.visual_findings is not None:
             faces = request.visual_findings.faces
@@ -160,13 +161,29 @@ class PolicyService:
                     applied_actions=["block"],
                     text_leaf_count=len(leaves),
                 )
-            if result is None and not request.text_pii_enabled:
-                result = PolicyResult(
-                    segments=request.segments,
-                    decision="pass",
-                    remote_allowed=True,
-                    text_leaf_count=len(leaves),
-                )
+        if result is None and (
+            any(row.action == "block" for row in source_rows) or len(source_routes) > 1
+        ):
+            result = PolicyResult(
+                decision="block",
+                remote_allowed=False,
+                applied_actions=["block"],
+                text_leaf_count=len(leaves),
+            )
+        if result is None and not request.text_pii_enabled:
+            result = PolicyResult(
+                segments=request.segments,
+                decision="pass",
+                remote_allowed=True,
+                text_leaf_count=len(leaves),
+            )
+            required_routes = source_routes | ({face_route} if face_route else set())
+            if len(required_routes) > 1:
+                block_result(result)
+            elif required_routes:
+                result.decision = "reroute"
+                result.remote_allowed = False
+                result.route_class = next(iter(required_routes))
         if result is None:
             result = self._analyze_text(
                 request,
@@ -174,10 +191,59 @@ class PolicyService:
                 include_diagnostics=include_diagnostics,
                 placeholder_namespace=placeholder_namespace,
                 face_route=face_route,
+                source_routes=source_routes,
             )
         if request.visual_findings is not None:
             self._apply_visual_result(result, request, face_route)
+        self._apply_source_result(result, source_rows)
+        validate_entity_bound(result.entity_counts)
         return result
+
+    def _source_restrictions(self, request: SegmentRequest) -> tuple[list[PIIReportRow], set[str]]:
+        """Resolve trusted whole-request classifications independently of text detection."""
+        policies = {entry.entity_type: entry for entry in self.policy.pii.entity_policies}
+        rows: list[PIIReportRow] = []
+        routes: set[str] = set()
+        for source in request.mcp_sources:
+            entry = policies.get(source, policies.get("MCP_TOOL_DEFAULT"))
+            action = cast(PIIAction, entry.action if entry is not None else "block")
+            if action == "reroute":
+                routes.add(
+                    entry.route_class
+                    if entry is not None and entry.route_class
+                    else self.policy.routing.default_target
+                )
+            rows.append(
+                PIIReportRow(
+                    entity_type=source,
+                    action=action,
+                    detected_count=1,
+                    transformed_count=0,
+                    unique_transformed_count=0,
+                )
+            )
+        return rows, routes
+
+    def _apply_source_result(self, result: PolicyResult, rows: list[PIIReportRow]) -> None:
+        """Report source evidence without inventing spans or transformed content."""
+        for row in rows:
+            result.entity_counts[row.entity_type] = 1
+            result.report_rows.append(
+                row.model_copy(update={"action": "block"}) if result.decision == "block" else row
+            )
+        result.entities = sorted(result.entity_counts)
+        result.report_rows.sort(key=lambda row: row.entity_type)
+        if result.decision == "block":
+            block_result(result)
+        else:
+            result.applied_actions = sorted(
+                set(result.applied_actions) | {row.action for row in rows}
+            )
+            if (
+                result.decision == "reroute"
+                and self.policy.notice.rerouted not in result.response_notices
+            ):
+                result.response_notices.append(self.policy.notice.rerouted)
 
     def _analyze_text(
         self,
@@ -187,20 +253,22 @@ class PolicyService:
         include_diagnostics: bool,
         placeholder_namespace: str | None,
         face_route: str | None,
+        source_routes: set[str],
     ) -> PolicyResult:
         """Resolve text and face routing conflicts before transforming any text."""
         nonce = placeholder_namespace or request_nonce()
-        prepared, entities, counts, route_classes, reroute_entities, overlap_count = (
+        prepared, entities, counts, _route_classes, reroute_entities, overlap_count = (
             self._prepare_plans(leaves, reroute_as_block=request.request_kind == "mcp")
         )
         logical_detections, effective_regions, diagnostics_truncated = (
             self._diagnostics(prepared) if include_diagnostics else ([], [], False)
         )
         original_text = "\n".join(leaf.text for leaf in leaves)
-        if any(plan.blocked for _leaf, plan in prepared) or self._face_route_conflicts(
-            face_route, reroute_entities
-        ):
-            return PolicyResult(
+        required_routes = source_routes | self._required_text_routes(reroute_entities)
+        if face_route is not None:
+            required_routes.add(face_route)
+        if any(plan.blocked for _leaf, plan in prepared) or len(required_routes) > 1:
+            result = PolicyResult(
                 request=None,
                 decision="block",
                 remote_allowed=False,
@@ -215,8 +283,10 @@ class PolicyService:
                 effective_regions=effective_regions,
                 diagnostics_truncated=diagnostics_truncated,
             )
+            block_result(result)
+            return result
 
-        route_class = face_route or self._resolve_route_class(reroute_entities, route_classes)
+        route_class = next(iter(required_routes), None)
         transformed, actions, reversal = self._transform_plans(request, prepared, nonce)
         if any(placeholder in original_text for placeholder in reversal):
             raise ValueError("generated reversal placeholder already existed in request")
@@ -253,12 +323,15 @@ class PolicyService:
             diagnostics_truncated=diagnostics_truncated,
         )
 
-    def _face_route_conflicts(self, face_route: str | None, reroute_entities: set[str]) -> bool:
-        """Require every effective text reroute to agree with the face route."""
-        return face_route is not None and any(
-            self._resolve_route_class({entity}, [self.policy.routing.default_target]) != face_route
+    def _required_text_routes(self, reroute_entities: set[str]) -> set[str]:
+        """Compare canonical dispatch IDs, not nonterminal classifier strings."""
+        policies = {entry.entity_type: entry for entry in self.policy.pii.entity_policies}
+        return {
+            entry.route_class
+            if (entry := policies.get(entity)) is not None and entry.route_class
+            else self.policy.routing.default_target
             for entity in reroute_entities
-        )
+        }
 
     def _apply_visual_result(
         self, result: PolicyResult, document: SegmentRequest, face_route: str | None
@@ -440,8 +513,12 @@ class PolicyService:
         if request.request_kind == "mcp" and not leaves and not request.attachments_present:
             return PolicyResult(segments=[], decision="pass", remote_allowed=True)
         attachments = request.attachments_present
-        if leaves or not attachments:
+        if (request.text_pii_enabled or request.visual_findings is not None) and (
+            leaves or not attachments
+        ):
             self._validate_bounds(leaves)
+        else:
+            self.validate_segment_limits(leaves)
         if attachments:
             actions_total.labels(action="block").inc()
             return PolicyResult(
@@ -533,14 +610,6 @@ class PolicyService:
             for match in pattern.finditer(text)
         ]
 
-    def _resolve_route_class(self, reroute_entities: set[str], detected: list[str]) -> str | None:
-        if not detected:
-            return None
-        for entry in self.policy.pii.entity_policies:
-            if entry.entity_type in reroute_entities and entry.action == "reroute":
-                return entry.route_class or self.policy.routing.default_target
-        return detected[0]
-
     def _classify(self, segments: list[TextSegment]) -> str:
         text = "\n".join(segment.text for segment in segments)
         for item in self.policy.classifier.classes:
@@ -558,6 +627,34 @@ class PolicyService:
         if self.policy.notice.show_when_no_pii_detected:
             return ["No sensitive data was detected by the configured policy."]
         return []
+
+
+def validate_entity_bound(counts: dict[str, int]) -> None:
+    """Reject aggregate overflow rather than discard policy evidence."""
+    if len(counts) > 64:
+        raise InvalidAnalysisRequestError("combined entity evidence exceeds the supported limit")
+
+
+def block_result(result: PolicyResult) -> None:
+    """Normalize effective terminal evidence and remove all forwarding material."""
+    result.decision = "block"
+    result.remote_allowed = False
+    result.segments = None
+    result.request = None
+    result.route_class = None
+    result.reversal = {}
+    result.applied_actions = ["block"]
+    has_block = any(row.action == "block" for row in result.report_rows)
+    result.report_rows = [
+        row.model_copy(
+            update={
+                "action": row.action if has_block else "block",
+                "transformed_count": 0,
+                "unique_transformed_count": 0,
+            }
+        )
+        for row in result.report_rows
+    ]
 
 
 def _merge_counts(target: dict[str, int], source: dict[str, int]) -> None:
