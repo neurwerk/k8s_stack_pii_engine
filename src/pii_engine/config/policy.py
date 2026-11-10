@@ -54,6 +54,12 @@ class EntityPolicy(PolicyModel):
             raise ValueError("FACE is reserved for trusted visual findings")
         if self.action not in ACTION_BY_NAME:
             raise ValueError(f"unsupported entity action: {self.action}")
+        if self.entity_type.startswith("MCP_TOOL_") and (
+            self.action not in {"pass", "block", "reroute"}
+            or self.patterns
+            or re.fullmatch(r"MCP_TOOL_[A-Z0-9_]+", self.entity_type) is None
+        ):
+            raise ValueError("MCP source policies require pass, block or reroute without patterns")
         if self.route_class is not None and self.action != "reroute":
             raise ValueError("routeClass is valid only for reroute")
         for pattern in self.patterns:
@@ -91,8 +97,8 @@ class CustomRecognizer(PolicyModel):
     @model_validator(mode="after")
     def compile_regex(self) -> CustomRecognizer:
         """Fail startup instead of silently skipping an invalid recognizer."""
-        if self.entity == "FACE":
-            raise ValueError("FACE is reserved for trusted visual findings")
+        if self.entity == "FACE" or self.entity.startswith("MCP_TOOL_"):
+            raise ValueError("entity is reserved for trusted findings")
         try:
             re.compile(self.regex)
         except re.error as exc:
@@ -127,6 +133,8 @@ class PiiSettings(PolicyModel):
         """Reject duplicate policies, unsupported languages, and invalid defaults."""
         if "FACE" in self.analyzer_entities:
             raise ValueError("FACE is reserved for trusted visual findings")
+        if any(entity.startswith("MCP_TOOL_") for entity in self.analyzer_entities):
+            raise ValueError("MCP sources cannot be selected for text analysis")
         if self.default_action not in ACTION_BY_NAME:
             raise ValueError("unsupported default action")
         if not set(self.analyzer_languages).issubset(self.supported_languages):

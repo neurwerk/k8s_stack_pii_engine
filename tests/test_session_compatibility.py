@@ -21,6 +21,7 @@ from pii_engine.models.contracts import (
     TextSegment,
 )
 from pii_engine.runtime import EngineRuntime, set_runtime
+from pii_engine.services.errors import InvalidAnalysisRequestError
 from pii_engine.services.session import SessionDecision, SessionStore
 
 
@@ -432,7 +433,7 @@ async def test_session_payload_contains_no_request_or_reversal_material() -> Non
 
 
 @pytest.mark.parametrize("attachments_present", [False, True])
-async def test_unmasked_reroute_uses_cache_only_without_raw_attachments(
+async def test_unmasked_cached_reroute_checks_current_request_and_raw_attachments(
     attachments_present: bool,
 ) -> None:
     runtime, _redis = _runtime()
@@ -462,9 +463,130 @@ async def test_unmasked_reroute_uses_cache_only_without_raw_attachments(
         assert repeated.reversal == {}
     else:
         assert repeated.decision == "reroute"
-        assert repeated.analysis_source == "cached_decision"
+        assert repeated.analysis_source == "current_request"
+        assert repeated.scan_performed is True
         assert repeated.cached_decision_applied is True
-        assert repeated.report_rows == first.report_rows
+        assert repeated.report_rows == []
+
+
+@pytest.mark.parametrize("mask_on_reroute", [False, True])
+@pytest.mark.parametrize("next_action", ["pass", "block", "same-route", "conflicting-route"])
+async def test_cached_reroute_never_skips_new_sources_or_erases_terminal_evidence(
+    mask_on_reroute: bool, next_action: str
+) -> None:
+    runtime, redis = _runtime()
+    raw = runtime.policy_settings.model_dump(by_alias=True)
+    raw["pii"]["maskOnReroute"] = mask_on_reroute
+    action = "reroute" if "route" in next_action else next_action
+    raw["pii"]["entityPolicies"].extend(
+        [
+            {"entityType": "MCP_TOOL_A", "action": "reroute", "routeClass": "local"},
+            {
+                "entityType": "MCP_TOOL_B",
+                "action": action,
+                **(
+                    {"routeClass": "other" if next_action == "conflicting-route" else "local"}
+                    if action == "reroute"
+                    else {}
+                ),
+            },
+        ]
+    )
+    runtime.policy_settings = PolicySettings.model_validate(raw)
+    runtime.policy = runtime._policy_service(runtime.policy_settings)
+    key = "c" * 64
+
+    def request(source: str) -> SegmentRequest:
+        return SegmentRequest(
+            request_kind="chat",
+            scope="session",
+            text_pii_enabled=False,
+            segments=[TextSegment(id="s0", text="business data")],
+            mcp_sources=[source],
+        )
+
+    first = await runtime.analyze_segments("adapter", request("MCP_TOOL_A"), key)
+    assert first.decision == "reroute"
+    current = await runtime.analyze_segments("adapter", request("MCP_TOOL_B"), key)
+    blocked = next_action in {"block", "conflicting-route"}
+    assert current.decision == ("block" if blocked else "reroute")
+    assert current.route_class == (None if blocked else "local")
+    assert current.reversal == {}
+    assert current.scan_performed is False
+    stored = SessionDecision.model_validate_json(next(iter(redis.values.values())))
+    assert stored.decision == current.decision
+    if next_action in {"same-route", "conflicting-route"}:
+        assert stored.entities == ["MCP_TOOL_A", "MCP_TOOL_B"]
+        assert [row.entity_type for row in stored.report_rows] == stored.entities
+    later = await runtime.analyze_segments("adapter", request("MCP_TOOL_B"), key)
+    assert later.decision == current.decision
+    assert later.route_class == current.route_class
+
+
+@pytest.mark.parametrize("mask_on_reroute", [False, True])
+async def test_cached_reroute_blocks_conflicting_current_text_route(
+    mask_on_reroute: bool,
+) -> None:
+    runtime, _redis = _runtime()
+    raw = runtime.policy_settings.model_dump(by_alias=True)
+    raw["pii"]["maskOnReroute"] = mask_on_reroute
+    raw["pii"]["entityPolicies"][0] = {
+        "entityType": "EMAIL_ADDRESS",
+        "action": "reroute",
+        "routeClass": "other",
+    }
+    runtime.policy_settings = PolicySettings.model_validate(raw)
+    runtime.policy = runtime._policy_service(runtime.policy_settings)
+    key = "d" * 64
+    await runtime.analyze(
+        "adapter",
+        OpenAIChatRequest(
+            model="test", messages=[ChatMessage(role="user", content="DE89370400440532013000")]
+        ),
+        key,
+    )
+    current = await runtime.analyze(
+        "adapter",
+        OpenAIChatRequest(
+            model="test", messages=[ChatMessage(role="user", content="a@example.com")]
+        ),
+        key,
+    )
+    assert current.decision == "block"
+    assert current.request is None
+    assert current.segments is None
+    assert current.route_class is None
+    assert current.reversal == {}
+    assert all(row.transformed_count == 0 for row in current.report_rows)
+
+
+async def test_accumulated_source_cache_bound_rejects_without_dropping_earlier_evidence() -> None:
+    runtime, redis = _runtime()
+    raw = runtime.policy_settings.model_dump(by_alias=True)
+    raw["pii"]["entityPolicies"].append(
+        {"entityType": "MCP_TOOL_DEFAULT", "action": "reroute", "routeClass": "local"}
+    )
+    runtime.policy_settings = PolicySettings.model_validate(raw)
+    runtime.policy = runtime._policy_service(runtime.policy_settings)
+    key = "a" * 64
+
+    def request(start: int, count: int) -> SegmentRequest:
+        return SegmentRequest(
+            request_kind="chat",
+            scope="session",
+            text_pii_enabled=False,
+            segments=[TextSegment(id="s0", text="data")],
+            mcp_sources=[f"MCP_TOOL_{index}" for index in range(start, start + count)],
+        )
+
+    await runtime.analyze_segments("adapter", request(0, 32), key)
+    result = await runtime.analyze_segments("adapter", request(32, 32), key)
+    assert len(result.entities) == 64
+    stored = SessionDecision.model_validate_json(next(iter(redis.values.values())))
+    assert len(stored.entities) == len(stored.report_rows) == 64
+    with pytest.raises(InvalidAnalysisRequestError, match="combined entity evidence"):
+        await runtime.analyze_segments("adapter", request(64, 1), key)
+    assert SessionDecision.model_validate_json(next(iter(redis.values.values()))) == stored
 
 
 async def test_sticky_reroute_reports_only_current_rows_and_preserves_cached_taint() -> None:

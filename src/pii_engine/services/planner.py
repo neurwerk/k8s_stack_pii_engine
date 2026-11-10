@@ -119,6 +119,8 @@ class ActionPlanner:
             if existing is not None and existing != action:
                 raise ValueError("one entity type resolved to inconsistent actions")
             plan.entity_actions[match.entity_type] = action
+            if action == "reroute":
+                plan.reroute_entities.add(match.entity_type)
             plan.entities.add(match.entity_type)
             plan.entity_counts[match.entity_type] = plan.entity_counts.get(match.entity_type, 0) + 1
             entities_total.labels(entity_type=match.entity_type).inc()

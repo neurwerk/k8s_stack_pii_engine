@@ -460,6 +460,7 @@ def _segment_fields(result: PolicyResult, request: SegmentRequest) -> dict[str, 
             not result.scan_performed
             and result.analysis_source == "current_request"
             and request.visual_findings is None
+            and request.text_pii_enabled
             and not (
                 request.request_kind == "mcp"
                 and not request.segments
@@ -487,6 +488,12 @@ def _segment_fields(result: PolicyResult, request: SegmentRequest) -> dict[str, 
             and (result.segments != request.segments)
         ):
             raise ValueError("visual-only request changed text")
+    if not request.text_pii_enabled and (
+        result.scan_performed
+        or result.reversal
+        or (result.segments is not None and result.segments != request.segments)
+    ):
+        raise ValueError("source-only analysis cannot scan or change text")
     if request.request_kind == "mcp" and (
         result.decision == "reroute"
         or result.route_class is not None

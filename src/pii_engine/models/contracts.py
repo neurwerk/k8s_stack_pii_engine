@@ -226,6 +226,9 @@ class SegmentRequest(StrictModel):
     text_pii_enabled: Annotated[bool, Field(strict=True)] = True
     attachments_present: Annotated[bool, Field(strict=True)] = False
     visual_findings: VisualFindings | None = None
+    mcp_sources: list[Annotated[str, Field(max_length=64, pattern=r"^MCP_TOOL_[A-Z0-9_]+$")]] = (
+        Field(default_factory=list, max_length=32)
+    )
 
     @model_validator(mode="after")
     def validate_segments(self) -> SegmentRequest:
@@ -237,7 +240,14 @@ class SegmentRequest(StrictModel):
             self.request_kind == "mcp" or self.scope != "request" or self.attachments_present
         ):
             raise ValueError("visual findings require converted request-scoped model segments")
-        if not self.text_pii_enabled and self.visual_findings is None:
+        if self.mcp_sources and self.request_kind == "mcp":
+            raise ValueError("MCP sources require a model request")
+        self.mcp_sources = sorted(set(self.mcp_sources))
+        if (
+            not self.text_pii_enabled
+            and self.visual_findings is None
+            and self.request_kind == "mcp"
+        ):
             raise ValueError("disabling text analysis requires visual findings")
         return self
 
@@ -304,6 +314,9 @@ class PIIReportRow(StrictModel):
         if self.entity_type == "FACE":
             if self.action not in {"block", "text-only", "reroute"} or self.transformed_count:
                 raise ValueError("FACE rows require a visual action without transformations")
+        elif self.entity_type.startswith("MCP_TOOL_"):
+            if self.action not in {"pass", "block", "reroute"} or self.transformed_count:
+                raise ValueError("MCP source rows require source actions without transformations")
         elif self.action == "text-only":
             raise ValueError("text-only is reserved for FACE rows")
         if self.transformed_count > self.detected_count:
@@ -619,7 +632,6 @@ class AdapterSegmentAnalyzeResponse(SegmentAnalysisResponse):
                 "reroute" not in actions
                 and not (
                     self.analysis.source == "current_request"
-                    and self.analysis.scan_performed
                     and self.analysis.cached_decision_applied
                 )
             )
@@ -647,7 +659,10 @@ class AdapterSegmentAnalyzeResponse(SegmentAnalysisResponse):
                 raise ValueError("FACE counts must match visual findings")
             if faces.scan_status == "failed" and self.decision != "block":
                 raise ValueError("failed face inspection requires a block")
-            if not self.analysis.scan_performed and set(self.entity_counts) - {"FACE"}:
+            if not self.analysis.scan_performed and any(
+                entity != "FACE" and not entity.startswith("MCP_TOOL_")
+                for entity in self.entity_counts
+            ):
                 raise ValueError("unscanned visual results cannot claim text detections")
             face_row = next((row for row in self.report.rows if row.entity_type == "FACE"), None)
             if face_row is not None and (

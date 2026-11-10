@@ -6,7 +6,14 @@ import re
 
 import pytest
 
-from pii_engine.config.policy import AttachmentsSettings, PolicySettings, RoutingSettings
+from pii_engine.config.policy import (
+    AttachmentsSettings,
+    CustomRecognizer,
+    EntityPolicy,
+    PiiSettings,
+    PolicySettings,
+    RoutingSettings,
+)
 from pii_engine.lib.actions import ACTION_BY_NAME
 from pii_engine.services.analyzer import EntityMatch
 from pii_engine.services.anonymizer import TestAnonymizer
@@ -41,6 +48,25 @@ def _apply(action: str, **params: object):
     match = EntityMatch("EMAIL_ADDRESS", 6, len(text), 0.99, "test")
     planner = ActionPlanner(_policy(action, **params), TestAnonymizer(), b"k" * 32, "test")
     return planner.apply(text, [match], "0123456789abcdef")
+
+
+@pytest.mark.parametrize(
+    "action", ["mask", "replace", "redact", "hash", "encrypt", "reversible_replace"]
+)
+def test_source_policies_reject_text_transformation_actions(action: str) -> None:
+    with pytest.raises(ValueError, match="MCP source policies"):
+        EntityPolicy(entityType="MCP_TOOL_A", action=action)
+
+
+def test_source_namespace_cannot_be_used_for_text_detection() -> None:
+    with pytest.raises(ValueError, match="without patterns"):
+        EntityPolicy(entityType="MCP_TOOL_A", action="block", patterns=["business data"])
+    with pytest.raises(ValueError, match="text analysis"):
+        PiiSettings(analyzerLanguages=["en"], analyzerEntities=["MCP_TOOL_DEFAULT"])
+    with pytest.raises(ValueError, match="reserved"):
+        CustomRecognizer(
+            name="source", entity="MCP_TOOL_A", regex="data", supportedLanguages=["en"]
+        )
 
 
 @pytest.mark.parametrize(

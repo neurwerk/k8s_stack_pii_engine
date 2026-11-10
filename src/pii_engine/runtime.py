@@ -46,7 +46,12 @@ from pii_engine.services.anonymizer import PresidioAnonymizer, TestAnonymizer
 from pii_engine.services.errors import InvalidAnalysisRequestError
 from pii_engine.services.limiter import AnalysisCapacityError, AnalysisLimiter
 from pii_engine.services.planner import ActionPlanner
-from pii_engine.services.policy import PolicyResult, PolicyService
+from pii_engine.services.policy import (
+    PolicyResult,
+    PolicyService,
+    block_result,
+    validate_entity_bound,
+)
 from pii_engine.services.remote_http import analysis_budget
 from pii_engine.services.session import RequestKind, SessionDecision, SessionStore
 from pii_engine.services.traversal import legacy_segments, restore_legacy_result
@@ -283,7 +288,7 @@ class EngineRuntime:
             if request_scoped
             else await self._cached_decision(caller, session_key, request_kind)
         )
-        cached_result = self._final_cached_result(request, cached, active_policy)
+        cached_result = self._final_cached_result(request, cached)
         if cached_result is not None:
             self._validate_result_kind(cached_result, request_kind)
             self._record_result(caller, cached_result)
@@ -621,16 +626,11 @@ class EngineRuntime:
         cls,
         request: SegmentRequest,
         cached: SessionDecision | None,
-        policy: PolicySettings,
     ) -> PolicyResult | None:
         """Return cache results that need no current-request transformation."""
         if cached is None:
             return None
         if cached.decision == "block":
-            return cls._result_from_cache(request, cached)
-        if request.attachments_present:
-            return None
-        if not policy.pii.mask_on_reroute:
             return cls._result_from_cache(request, cached)
         return None
 
@@ -638,6 +638,7 @@ class EngineRuntime:
     def _apply_cached_decision(result: PolicyResult, cached: SessionDecision | None) -> None:
         """Apply sticky routing after current-request masking has completed."""
         if cached is not None and cached.decision == "reroute" and result.decision != "block":
+            conflict = result.decision == "reroute" and result.route_class != cached.route_class
             result.decision = "reroute"
             result.remote_allowed = False
             result.route_class = cached.route_class
@@ -648,6 +649,12 @@ class EngineRuntime:
             result.request_notices = cached.request_notices
             result.response_notices = cached.response_notices
             result.cached_decision_applied = True
+            validate_entity_bound(result.entity_counts)
+            if conflict:
+                rows = {row.entity_type: row for row in cached.report_rows}
+                rows.update({row.entity_type: row for row in result.report_rows})
+                result.report_rows = [rows[entity] for entity in sorted(rows)]
+                block_result(result)
 
     async def _taint_session(
         self,
@@ -676,8 +683,16 @@ class EngineRuntime:
         if result.cached_decision_applied:
             if cached is None:
                 raise ValueError("cache-applied result is missing its session decision")
-            report_rows = cached.report_rows
-            overlap_count = cached.overlap_count
+            rows = {row.entity_type: row for row in cached.report_rows}
+            rows.update(
+                {row.entity_type: row for row in result.report_rows if row.action == "reroute"}
+            )
+            report_rows = (
+                result.report_rows
+                if result.decision == "block"
+                else [rows[entity] for entity in sorted(rows)]
+            )
+            overlap_count = max(cached.overlap_count, result.overlap_count)
         await self.session.set(
             key,
             SessionDecision(
