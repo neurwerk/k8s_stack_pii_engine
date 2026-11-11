@@ -230,6 +230,7 @@ async def test_source_pass_does_not_disable_ordinary_pii(
                 "pii": {
                     "entityPolicies": [
                         _source_rule("MCP_TOOL_A", "pass"),
+                        _source_rule("MCP_TOOL_DEFAULT", "block"),
                         {"entityType": "EMAIL_ADDRESS", "action": action},
                     ]
                 }
@@ -241,8 +242,21 @@ async def test_source_pass_does_not_disable_ordinary_pii(
     assert body["decision"] == ("block" if action == "block" else "apply_actions")
     assert body["analysis"]["scan_performed"]
     assert body["entity_counts"] == {"EMAIL_ADDRESS": 1, "MCP_TOOL_A": 1}
+    rows = {row["entity_type"]: row for row in body["report"]["rows"]}
+    assert rows["EMAIL_ADDRESS"]["action"] == action
+    assert rows["MCP_TOOL_A"]["action"] == "pass"
+    assert rows["MCP_TOOL_A"]["detected_count"] == 1
+    assert rows["MCP_TOOL_A"]["transformed_count"] == 0
+    assert rows["MCP_TOOL_A"]["unique_transformed_count"] == 0
     if action == "mask":
         assert "a@example.com" not in body["segments"][0]["text"]
+    else:
+        assert body["remote_allowed"] is False
+        assert body["segments"] is None
+        assert all(
+            row["transformed_count"] == row["unique_transformed_count"] == 0
+            for row in rows.values()
+        )
 
 
 @pytest.mark.parametrize("other", ["source", "text", "face"])
