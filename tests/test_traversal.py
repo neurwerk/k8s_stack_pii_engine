@@ -193,6 +193,44 @@ def test_stringified_tool_arguments_remain_valid_protocol_json() -> None:
     assert json.loads(arguments) == {"query": "*************", "limit": 2}
 
 
+@pytest.mark.parametrize("kind", ["chat", "responses"])
+def test_large_historical_tool_batches_inspect_the_33rd_call(kind) -> None:
+    history = []
+    for batch, count in enumerate((33, 32)):
+        calls = []
+        for index in range(count):
+            arguments = json.dumps(
+                {"query": "a@example.com" if batch == 0 and index == 32 else "ordinary"}
+            )
+            call_id = f"history-{batch}-{index}"
+            calls.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": arguments},
+                }
+                if kind == "chat"
+                else {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": "lookup",
+                    "arguments": arguments,
+                }
+            )
+        history.extend([{"role": "assistant", "tool_calls": calls}] if kind == "chat" else calls)
+    model = OpenAIChatRequest if kind == "chat" else OpenAIResponsesRequest
+    request = model.model_validate(
+        {"model": "test", "messages" if kind == "chat" else "input": history}
+    )
+    assert len(list(iter_text_leaves(request))) == 65
+    runtime = EngineRuntime(Settings(allow_test_analyzer=True, enforce_client_identity=False))
+    result = runtime.policy.analyze(request)
+    assert result.request is not None
+    leaves = list(iter_text_leaves(result.request))
+    assert leaves[32].text == "*************"
+    assert sum(leaf.text == "ordinary" for leaf in leaves) == 64
+
+
 def test_response_format_schema_prose_is_traversed_and_sanitized() -> None:
     """Structured-output descriptions and defaults cannot carry uninspected PII."""
     request = OpenAIChatRequest.model_validate(
