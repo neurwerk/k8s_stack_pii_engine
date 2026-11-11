@@ -228,9 +228,7 @@ class PolicyService:
         """Report source evidence without inventing spans or transformed content."""
         for row in rows:
             result.entity_counts[row.entity_type] = 1
-            result.report_rows.append(
-                row.model_copy(update={"action": "block"}) if result.decision == "block" else row
-            )
+            result.report_rows.append(row)
         result.entities = sorted(result.entity_counts)
         result.report_rows.sort(key=lambda row: row.entity_type)
         if result.decision == "block":
