@@ -70,6 +70,39 @@ def test_source_namespace_cannot_be_used_for_text_detection() -> None:
 
 
 @pytest.mark.parametrize(
+    "rules",
+    [
+        [{"entityType": "EMAIL_ADDRESS", "action": "pass"}],
+        [{"entityType": "MCP_TOOL_A", "action": "mask"}],
+        [{"entityType": "MCP_TOOL_A", "action": "pass", "patterns": []}],
+        [{"entityType": "MCP_TOOL_A", "action": "pass", "routeClass": "other"}],
+        [{"entityType": "MCP_TOOL_A", "action": "pass"}] * 2,
+        [{"entityType": f"MCP_TOOL_{i}", "action": "pass"} for i in range(65)],
+    ],
+)
+def test_model_source_rules_reject_ambiguous_or_non_source_settings(rules):
+    with pytest.raises(ValueError):
+        PiiSettings(analyzerLanguages=["en"], modelSourcePolicies={"approved/a": rules})
+
+
+@pytest.mark.parametrize(
+    "models", [{"": []}, {"x" * 129: []}, {"local/*": []}, {f"model/{i}": [] for i in range(257)}]
+)
+def test_model_source_map_bounds(models):
+    with pytest.raises(ValueError):
+        PiiSettings(analyzerLanguages=["en"], modelSourcePolicies=models)
+
+
+def test_model_source_map_accepts_exact_bounds():
+    rules = [{"entityType": f"MCP_TOOL_{i}", "action": "pass"} for i in range(64)]
+    models = {f"model/{i}": rules for i in range(255)} | {"x" * 128: rules}
+    assert (
+        len(PiiSettings(analyzerLanguages=["en"], modelSourcePolicies=models).model_source_policies)
+        == 256
+    )
+
+
+@pytest.mark.parametrize(
     ("action", "params", "expected"),
     [
         ("pass", {}, "email a@example.com"),

@@ -51,6 +51,41 @@ def _runtime() -> tuple[EngineRuntime, _FakeRedis]:
     return runtime, redis
 
 
+@pytest.mark.parametrize("action", ["block", "reroute"])
+async def test_model_source_taint_stays_sticky_until_policy_version_changes(action):
+    redis = _FakeRedis()
+
+    def runtime(version, source_action):
+        instance = EngineRuntime(Settings(allow_test_analyzer=True, policy_version=version))
+        raw = instance.policy_settings.model_dump(by_alias=True)
+        raw["pii"]["modelSourcePolicies"] = {
+            "approved/a": [{"entityType": "MCP_TOOL_DEFAULT", "action": source_action}]
+        }
+        instance.policy_settings = PolicySettings.model_validate(raw)
+        instance.policy = instance._policy_service(instance.policy_settings)
+        instance.session = SessionStore("redis://unused", 60, instance.settings.policy_version)
+        instance.session._client = redis
+        return instance
+
+    request = SegmentRequest(
+        request_kind="chat",
+        scope="session",
+        segments=[],
+        text_pii_enabled=False,
+        destination_model="approved/a",
+        mcp_sources=["MCP_TOOL_A"],
+    )
+    key = "d" * 64
+    first = await runtime("before", action).analyze_segments("adapter", request, key)
+    assert first.decision == action
+    repeated = await runtime("before", "pass").analyze_segments("adapter", request, key)
+    assert repeated.decision == action
+    assert repeated.cached_decision_applied
+    changed = await runtime("after", "pass").analyze_segments("adapter", request, key)
+    assert changed.decision == "pass"
+    assert not changed.cached_decision_applied
+
+
 def _set_reversible_policy(runtime: EngineRuntime) -> None:
     raw_policy = runtime.policy_settings.model_dump(by_alias=True)
     raw_policy["pii"]["entityPolicies"][0]["action"] = "reversible_replace"

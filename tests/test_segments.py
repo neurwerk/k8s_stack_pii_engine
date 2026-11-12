@@ -125,6 +125,83 @@ def _source_rule(source: str, action: str, route: str | None = None) -> dict[str
 
 
 @pytest.mark.parametrize(
+    ("model", "model_rules", "global_rules", "sources", "decision"),
+    [
+        ("approved/a", [("A", "pass"), ("DEFAULT", "block")], [("A", "block")], ["A"], "pass"),
+        ("approved/a", [("DEFAULT", "pass")], [("A", "reroute")], ["A"], "pass"),
+        ("approved/a", [], [("A", "pass"), ("DEFAULT", "reroute")], ["A"], "pass"),
+        ("approved/a", [], [("DEFAULT", "reroute")], ["A"], "reroute"),
+        ("approved/a", [], [], ["A"], "block"),
+        (None, [("DEFAULT", "pass")], [("DEFAULT", "reroute")], ["A"], "reroute"),
+        ("local/unknown", [("DEFAULT", "pass")], [("DEFAULT", "block")], ["A"], "block"),
+        ("upstream-alias", [("DEFAULT", "pass")], [], ["A"], "block"),
+        ("approved/a", [("A", "pass")], [("DEFAULT", "block")], ["A", "B"], "block"),
+    ],
+)
+async def test_explicit_model_source_precedence(
+    client, model, model_rules, global_rules, sources, decision
+):
+    response = await client.post(
+        "/v2/studio/evaluate-policy",
+        json={
+            "request": {
+                **_request("unchanged"),
+                "text_pii_enabled": False,
+                "destination_model": model,
+                "mcp_sources": [f"MCP_TOOL_{source}" for source in sources],
+            },
+            "policy": {
+                "pii": {
+                    "entityPolicies": [_source_rule(f"MCP_TOOL_{s}", a) for s, a in global_rules],
+                    "modelSourcePolicies": {
+                        "approved/a": [_source_rule(f"MCP_TOOL_{s}", a) for s, a in model_rules]
+                    },
+                }
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["decision"] == decision
+
+
+@pytest.mark.parametrize("face", [False, True])
+async def test_model_default_pass_keeps_text_and_face_blocks(client, face):
+    runtime = get_runtime()
+    raw = runtime.policy_settings.model_dump(by_alias=True)
+    raw["pii"]["modelSourcePolicies"] = {"approved/a": [_source_rule("MCP_TOOL_DEFAULT", "pass")]}
+    raw["pii"]["entityPolicies"] = [{"entityType": "EMAIL_ADDRESS", "action": "block"}]
+    runtime.policy_settings = PolicySettings.model_validate(raw)
+    runtime.policy = runtime._policy_service(runtime.policy_settings)
+    request = {
+        **_request("a@example.com"),
+        "destination_model": "approved/a",
+        "mcp_sources": ["MCP_TOOL_FUTURE"],
+        "text_pii_enabled": not face,
+    }
+    if face:
+        request["visual_findings"] = {"faces": {"scan_status": "complete", "count": 1}}
+    response = await client.post("/v2/adapter/analyze-segments", json=request)
+    assert response.status_code == 200, response.text
+    assert response.json()["decision"] == "block"
+
+
+@pytest.mark.parametrize("model", ["", "a" * 129, "local/*", "a b", 42])
+async def test_destination_model_validation(client, model):
+    response = await client.post(
+        "/v2/adapter/analyze-segments", json={**_request("text"), "destination_model": model}
+    )
+    assert response.status_code == 400
+
+
+async def test_mcp_operation_rejects_destination_model(client):
+    response = await client.post(
+        "/v2/adapter/analyze-segments",
+        json={**_request("text", kind="mcp"), "destination_model": "approved/a"},
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize(
     ("rules", "sources", "decision", "route"),
     [
         ([], ["MCP_TOOL_UNKNOWN"], "block", None),
