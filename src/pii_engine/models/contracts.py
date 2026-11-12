@@ -225,6 +225,7 @@ class SegmentRequest(StrictModel):
     segments: list[TextSegment]
     text_pii_enabled: Annotated[bool, Field(strict=True)] = True
     attachments_present: Annotated[bool, Field(strict=True)] = False
+    destination_local: Annotated[bool, Field(strict=True)] = False
     visual_findings: VisualFindings | None = None
     mcp_sources: list[Annotated[str, Field(max_length=64, pattern=r"^MCP_TOOL_[A-Z0-9_]+$")]] = (
         Field(default_factory=list, max_length=32)
@@ -242,6 +243,8 @@ class SegmentRequest(StrictModel):
             raise ValueError("visual findings require converted request-scoped model segments")
         if self.mcp_sources and self.request_kind == "mcp":
             raise ValueError("MCP sources require a model request")
+        if self.destination_local and self.request_kind == "mcp":
+            raise ValueError("local destination requires a model request")
         self.mcp_sources = sorted(set(self.mcp_sources))
         if (
             not self.text_pii_enabled

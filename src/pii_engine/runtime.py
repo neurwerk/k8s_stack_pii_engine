@@ -271,6 +271,12 @@ class EngineRuntime:
         policy = self._policy_service(active_policy) if policy_override is not None else self.policy
         request_kind = _request_kind(request)
         validated_session_key = None if request_scoped else _validated_session_key(session_key)
+        if request.destination_local and validated_session_key is not None:
+            # Local source policy must not reuse remote or pre-local-policy taint.
+            session_key = hashlib.sha256(
+                f"local-source-v1:{validated_session_key}".encode()
+            ).hexdigest()
+            validated_session_key = session_key
         placeholder_namespace = (
             _conversation_placeholder_namespace(
                 validated_session_key,
@@ -369,6 +375,7 @@ class EngineRuntime:
         raw_policy: dict[str, JsonValue] | None,
     ) -> PolicyEvaluationResult:
         """Evaluate one candidate under Studio admission limits without provider data."""
+        _validate_segment_caller(caller, request)
         if request.scope != "request" or request.visual_findings is not None:
             raise InvalidAnalysisRequestError("Studio evaluation requires request-scoped text")
         self.policy.validate_segment_limits(request.segments)
@@ -774,6 +781,8 @@ class EngineRuntime:
 
 
 def _validate_segment_caller(caller: str, request: SegmentRequest) -> None:
+    if request.destination_local and caller != "adapter":
+        raise InvalidAnalysisRequestError("local destination requires trusted adapter analysis")
     if caller == "studio" and request.scope != "request":
         raise InvalidAnalysisRequestError("Studio analysis must be request-scoped")
     if request.visual_findings is not None and caller != "adapter":
