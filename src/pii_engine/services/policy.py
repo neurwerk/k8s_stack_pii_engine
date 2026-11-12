@@ -202,10 +202,18 @@ class PolicyService:
     def _source_restrictions(self, request: SegmentRequest) -> tuple[list[PIIReportRow], set[str]]:
         """Resolve trusted whole-request classifications independently of text detection."""
         policies = {entry.entity_type: entry for entry in self.policy.pii.entity_policies}
+        model_policies = {
+            entry.entity_type: entry
+            for entry in self.policy.pii.model_source_policies.get(
+                request.destination_model or "", []
+            )
+        }
         rows: list[PIIReportRow] = []
         routes: set[str] = set()
         for source in request.mcp_sources:
-            entry = policies.get(source, policies.get("MCP_TOOL_DEFAULT"))
+            entry = model_policies.get(source, model_policies.get("MCP_TOOL_DEFAULT")) or (
+                policies.get(source, policies.get("MCP_TOOL_DEFAULT"))
+            )
             action = cast(PIIAction, entry.action if entry is not None else "block")
             if action == "reroute":
                 routes.add(

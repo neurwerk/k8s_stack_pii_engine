@@ -70,6 +70,41 @@ class EntityPolicy(PolicyModel):
         return self
 
 
+DestinationModel = Annotated[
+    str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+]
+
+
+class ModelSourcePolicy(PolicyModel):
+    """Restrict an explicitly selected model's whole-request MCP sources."""
+
+    entity_type: str = Field(alias="entityType", max_length=64, pattern=r"^MCP_TOOL_[A-Z0-9_]+$")
+    action: Literal["pass", "block", "reroute"]
+    route_class: str | None = Field(
+        default=None, alias="routeClass", max_length=128, pattern=r"^[A-Za-z0-9_.:/-]+$"
+    )
+
+    @model_validator(mode="after")
+    def validate_route(self) -> ModelSourcePolicy:
+        """Keep route targets exclusive to reroute actions."""
+        if self.route_class is not None and self.action != "reroute":
+            raise ValueError("routeClass is valid only for reroute")
+        return self
+
+
+ModelSourcePolicies = Annotated[
+    dict[DestinationModel, Annotated[list[ModelSourcePolicy], Field(max_length=64)]],
+    Field(max_length=256),
+]
+
+
+def _validate_model_sources(policies: ModelSourcePolicies) -> None:
+    for rules in policies.values():
+        sources = [rule.entity_type for rule in rules]
+        if len(sources) != len(set(sources)):
+            raise ValueError("model source policy is duplicated")
+
+
 class NerSettings(PolicyModel):
     """Select immutable model aliases from the synchronized bundle."""
 
@@ -123,6 +158,9 @@ class PiiSettings(PolicyModel):
     mask_on_reroute: bool = Field(default=True, alias="maskOnReroute")
     hash_window_hours: int = Field(default=24, alias="hashWindowHours", ge=1, le=720)
     entity_policies: list[EntityPolicy] = Field(default_factory=list, alias="entityPolicies")
+    model_source_policies: ModelSourcePolicies = Field(
+        default_factory=dict, alias="modelSourcePolicies"
+    )
     ner: NerSettings = Field(default_factory=NerSettings)
     custom_recognizers: list[CustomRecognizer] = Field(
         default_factory=list, alias="customRecognizers"
@@ -131,6 +169,7 @@ class PiiSettings(PolicyModel):
     @model_validator(mode="after")
     def validate_catalog_selection(self) -> PiiSettings:
         """Reject duplicate policies, unsupported languages, and invalid defaults."""
+        _validate_model_sources(self.model_source_policies)
         if "FACE" in self.analyzer_entities:
             raise ValueError("FACE is reserved for trusted visual findings")
         if any(entity.startswith("MCP_TOOL_") for entity in self.analyzer_entities):
@@ -306,6 +345,16 @@ class PiiOverride(PolicyModel):
     entity_policies: list[EntityPolicy] | None = Field(
         default=None, alias="entityPolicies", max_length=64
     )
+    model_source_policies: ModelSourcePolicies | None = Field(
+        default=None, alias="modelSourcePolicies"
+    )
+
+    @model_validator(mode="after")
+    def validate_model_sources(self) -> PiiOverride:
+        """Reject ambiguous model rules in previews as in deployed policy."""
+        if self.model_source_policies is not None:
+            _validate_model_sources(self.model_source_policies)
+        return self
 
 
 class SafetyOverride(PolicyModel):
@@ -349,7 +398,7 @@ def apply_policy_override(base: PolicySettings, override: PolicyOverride) -> Pol
 def _deep_update(target: dict[str, object], updates: dict[str, object]) -> None:
     for key, value in updates.items():
         current = target.get(key)
-        if isinstance(current, dict) and isinstance(value, dict):
+        if key != "modelSourcePolicies" and isinstance(current, dict) and isinstance(value, dict):
             _deep_update(current, value)
         else:
             target[key] = value

@@ -14,6 +14,42 @@ from pii_engine.runtime import PolicyEvaluationResult, get_runtime
 from pii_engine.services.analyzer import EntityMatch
 
 
+@pytest.mark.parametrize(
+    "candidate,decision",
+    [
+        ({}, "pass"),
+        ({"modelSourcePolicies": {}}, "block"),
+        ({"modelSourcePolicies": {"other/model": []}}, "block"),
+    ],
+)
+async def test_model_source_candidate_replaces_map_without_mutating_deployed(
+    client, candidate, decision
+):
+    runtime = get_runtime()
+    raw = runtime.policy_settings.model_dump(by_alias=True)
+    raw["pii"]["modelSourcePolicies"] = {
+        "approved/a": [{"entityType": "MCP_TOOL_DEFAULT", "action": "pass"}]
+    }
+    runtime.policy_settings = PolicySettings.model_validate(raw)
+    runtime.policy = runtime._policy_service(runtime.policy_settings)
+    before = runtime.policy_settings.model_dump()
+    request = {
+        "api_version": "v2",
+        "request_kind": "chat",
+        "scope": "request",
+        "segments": [],
+        "text_pii_enabled": False,
+        "destination_model": "approved/a",
+        "mcp_sources": ["MCP_TOOL_UNKNOWN"],
+    }
+    response = await client.post(
+        "/v2/studio/evaluate-policy", json={"request": request, "policy": {"pii": candidate}}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["decision"] == decision
+    assert runtime.policy_settings.model_dump() == before
+
+
 def _request(content: str = "email a@example.com") -> dict[str, object]:
     return {"model": "test", "messages": [{"role": "user", "content": content}]}
 
