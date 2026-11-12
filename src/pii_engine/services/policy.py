@@ -207,8 +207,6 @@ class PolicyService:
         for source in request.mcp_sources:
             entry = policies.get(source, policies.get("MCP_TOOL_DEFAULT"))
             action = cast(PIIAction, entry.action if entry is not None else "block")
-            if action == "reroute" and request.destination_local:
-                action = "pass"
             if action == "reroute":
                 routes.add(
                     entry.route_class
